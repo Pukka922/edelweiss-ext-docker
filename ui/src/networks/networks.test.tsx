@@ -66,6 +66,11 @@ describe("NetworkList", () => {
     expect(view.getByText("built in")).toBeTruthy();
     expect(view.getByText("internal")).toBeTruthy();
     expect((view.getByRole("button", { name: "Delete bridge" }) as HTMLButtonElement).disabled).toBe(true);
+    // the tooltip of a disabled button says why, the one of an enabled button names the action
+    const tip = (name: string) =>
+      view.getByRole("button", { name }).closest("[data-tip]")?.getAttribute("data-tip");
+    expect(tip("Delete bridge")).toBe("The networks bridge, host and none cannot be deleted.");
+    expect(tip("Delete front")).toBe("Delete");
     fireEvent.click(view.getByRole("button", { name: "front" }));
     await settle(); // the router navigates in a transition
     expect(view.history.get()).toBe("/x/docker/networks/f");
@@ -282,7 +287,11 @@ describe("NetworkDetail", () => {
     await waitFor(() => expect((view.getByLabelText("IPv4 address") as HTMLInputElement).value).toBe(""));
     expect((view.getByLabelText("Container") as HTMLSelectElement).value).toBe("");
     await waitFor(() => expect(calls.filter((c) => c.path === "/networks/f")).toHaveLength(2));
-    fireEvent.click(view.getByRole("button", { name: "Disconnect web" }));
+    const disconnect = view.getByRole("button", { name: "Disconnect web" });
+    expect(disconnect.textContent?.trim()).toBe("");
+    expect(disconnect.querySelector("svg")).not.toBeNull();
+    expect(disconnect.closest("[data-tip]")?.getAttribute("data-tip")).toBe("Disconnect");
+    fireEvent.click(disconnect);
     await waitFor(() => expect(messages(view)).toContain("web was disconnected."));
     expect(calls.find((c) => c.path === "/networks/f/disconnect")?.body).toEqual({ container: "c1" });
   });

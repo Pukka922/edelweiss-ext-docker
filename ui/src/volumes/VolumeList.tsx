@@ -7,8 +7,10 @@ import {
   useI18n,
   useToast,
 } from "@edelweiss/sdk";
+import { IconTrash } from "@tabler/icons-solidjs";
 import { createResource, createSignal, For, Match, Show, Switch } from "solid-js";
 import { shortId, type Volume } from "../api";
+import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
 import { formatDate } from "../format";
 import { onDockerChange } from "../live";
@@ -114,16 +116,14 @@ export function VolumeList() {
                         </td>
                         <td>
                           <div class="flex justify-end">
-                            <button
-                              type="button"
-                              class="btn btn-xs btn-ghost text-error"
-                              aria-label={`${t("actions.delete")} ${nameOf(v)}`}
+                            <IconButton
+                              icon={IconTrash}
+                              label={`${t("actions.delete")} ${nameOf(v)}`}
+                              tooltip={v.usedBy.length > 0 ? t("errors.volume_in_use") : t("actions.delete")}
+                              danger
                               disabled={v.usedBy.length > 0}
-                              title={v.usedBy.length > 0 ? t("errors.volume_in_use") : undefined}
                               onClick={() => setRemoving(v)}
-                            >
-                              {t("actions.delete")}
-                            </button>
+                            />
                           </div>
                         </td>
                       </tr>

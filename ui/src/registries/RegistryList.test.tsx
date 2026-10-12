@@ -45,7 +45,11 @@ describe("RegistryList", () => {
     });
     const view = mount(RegistryList, { path: "/registries" });
     await view.findByText("GHCR");
-    fireEvent.click(view.getByRole("button", { name: "Test connection GHCR" }));
+    const test = view.getByRole("button", { name: "Test connection GHCR" });
+    expect(test.textContent?.trim()).toBe("");
+    expect(test.querySelector("svg")).not.toBeNull();
+    expect(test.closest("[data-tip]")?.getAttribute("data-tip")).toBe("Test connection");
+    fireEvent.click(test);
     await waitFor(() =>
       expect(messages(view)).toContain("Connection failed: unauthorized: incorrect username or password"),
     );

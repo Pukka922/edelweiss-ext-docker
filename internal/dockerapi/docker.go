@@ -20,6 +20,7 @@ const DefaultHost = "unix:///var/run/docker.sock"
 type Docker interface {
 	Ping(ctx context.Context, options client.PingOptions) (client.PingResult, error)
 	ServerVersion(ctx context.Context, options client.ServerVersionOptions) (client.ServerVersionResult, error)
+	Info(ctx context.Context, options client.InfoOptions) (client.SystemInfoResult, error)
 
 	ContainerList(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error)
 	ContainerInspect(ctx context.Context, id string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error)

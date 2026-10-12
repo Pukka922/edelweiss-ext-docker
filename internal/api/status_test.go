@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 
 	"github.com/Pukka922/edelweiss-ext-docker/internal/dockertest"
@@ -56,5 +57,36 @@ func TestStatusOtherError(t *testing.T) {
 	resp := sdktest.Do(t, statusApp(t, f), sdktest.Request("GET", "/status", nil, sdk.User{Name: "anna"}))
 	if resp.StatusCode != 502 {
 		t.Fatalf("status %d, want 502", resp.StatusCode)
+	}
+}
+
+func TestStatusNamesTheHostsLimits(t *testing.T) {
+	f := &dockertest.Fake{
+		ServerVersionFn: func(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error) {
+			return client.ServerVersionResult{Version: "29.9.0"}, nil
+		},
+		InfoFn: func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			return client.SystemInfoResult{Info: system.Info{NCPU: 4, MemTotal: 8 << 30}}, nil
+		},
+	}
+	got := sdktest.DecodeJSON[Status](t, sdktest.Do(t, statusApp(t, f), sdktest.Request("GET", "/status", nil, sdk.User{Name: "anna"})))
+	if got.CPUs != 4 || got.Memory != 8<<30 {
+		t.Fatalf("status %+v", got)
+	}
+}
+
+func TestStatusWithoutInfoStillAnswers(t *testing.T) {
+	f := &dockertest.Fake{
+		ServerVersionFn: func(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error) {
+			return client.ServerVersionResult{Version: "29.9.0"}, nil
+		},
+		InfoFn: func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			return client.SystemInfoResult{}, errors.New("Error response from daemon: busy")
+		},
+	}
+	resp := sdktest.Do(t, statusApp(t, f), sdktest.Request("GET", "/status", nil, sdk.User{Name: "anna"}))
+	got := sdktest.DecodeJSON[Status](t, resp)
+	if resp.StatusCode != 200 || got.Docker != "ok" || got.CPUs != 0 || got.Memory != 0 {
+		t.Fatalf("%d %+v", resp.StatusCode, got)
 	}
 }

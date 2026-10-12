@@ -42,7 +42,38 @@ function pending() {
   return { response, finish };
 }
 
+/** The list with one running container, web. */
+async function mountListWithWeb() {
+  stubEventSource();
+  stubFetch({ "GET /containers": () => json(200, [web]) });
+  const view = mount(ContainerList, { path: "/containers" });
+  await view.findByText("web");
+  return view;
+}
+
 describe("ContainerList", () => {
+  it("has no Created column and shows the actions as icons with their names", async () => {
+    const view = await mountListWithWeb();
+    expect(view.queryByRole("columnheader", { name: "Created" })).toBeNull();
+    // the cell of the column is gone from the rows too: every row has a cell for each header
+    const headers = view.getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual(["Name", "Image", "State", "Ports", "Actions"]);
+    expect(view.getByText("web").closest("tr")?.querySelectorAll("td")).toHaveLength(headers.length);
+    const stop = view.getByRole("button", { name: "Stop web" });
+    expect(stop.textContent?.trim()).toBe("");
+    expect(stop.querySelector("svg")).not.toBeNull();
+    expect(stop.closest("[data-tip]")?.getAttribute("data-tip")).toBe("Stop");
+    for (const [name, tip] of [
+      ["Restart web", "Restart"],
+      ["Edit web", "Edit"],
+      ["Delete web", "Delete"],
+    ]) {
+      const button = view.getByRole("button", { name });
+      expect(button.querySelector("svg")).not.toBeNull();
+      expect(button.closest("[data-tip]")?.getAttribute("data-tip")).toBe(tip);
+    }
+  });
+
   it("lists the containers with state and published ports", async () => {
     stubEventSource();
     stubFetch({ "GET /containers": () => json(200, [db, web]) });

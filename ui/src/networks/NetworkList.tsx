@@ -7,8 +7,10 @@ import {
   useI18n,
   useToast,
 } from "@edelweiss/sdk";
+import { IconTrash } from "@tabler/icons-solidjs";
 import { createResource, createSignal, For, Match, Show, Switch } from "solid-js";
 import type { NetworkInfo } from "../api";
+import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
 import { onDockerChange } from "../live";
 import { NetworkDialog } from "./NetworkDialog";
@@ -94,16 +96,14 @@ export function NetworkList() {
                         <td class="text-sm">{n.containers}</td>
                         <td>
                           <div class="flex justify-end">
-                            <button
-                              type="button"
-                              class="btn btn-xs btn-ghost text-error"
-                              aria-label={`${t("actions.delete")} ${n.name}`}
+                            <IconButton
+                              icon={IconTrash}
+                              label={`${t("actions.delete")} ${n.name}`}
+                              tooltip={n.predefined ? t("errors.network_predefined") : t("actions.delete")}
+                              danger
                               disabled={n.predefined}
-                              title={n.predefined ? t("errors.network_predefined") : undefined}
                               onClick={() => setRemoving(n)}
-                            >
-                              {t("actions.delete")}
-                            </button>
+                            />
                           </div>
                         </td>
                       </tr>

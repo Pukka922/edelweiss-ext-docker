@@ -67,3 +67,64 @@ func TestCreateAndDetailsAgainstDaemon(t *testing.T) {
 		t.Fatal("the container still exists")
 	}
 }
+
+// The labels of the form reach the daemon, with their empty values and their case; a label in Docker's namespaces is refused.
+func TestCreateWithLabelsAgainstDaemon(t *testing.T) {
+	cli := dockertest.Live(t)
+	dockertest.Pull(t, cli, dockertest.Busybox)
+	app := testApp(cli)
+	name := dockertest.Name(t, "labels")
+	body := toJSON(t, Spec{Name: name, Image: dockertest.Busybox, Command: "sleep 300",
+		Labels: []Label{{Key: "tier", Value: "front"}, {Key: "App", Value: "web"}, {Key: "empty", Value: ""}}, Start: true})
+	resp := sdktest.Do(t, app, sdktest.Request("POST", "/containers", strings.NewReader(body), anna))
+	res := sdktest.DecodeJSON[CreateResult](t, resp)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create: %d %+v", resp.StatusCode, res)
+	}
+	dockertest.RemoveContainerAtEnd(t, cli, res.ID)
+	got, err := cli.ContainerInspect(context.Background(), res.ID, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := got.Container.Config.Labels
+	if empty, ok := labels["empty"]; labels["tier"] != "front" || labels["App"] != "web" || !ok || empty != "" || len(labels["app"]) != 0 {
+		t.Fatalf("labels of the new container %q", labels)
+	}
+	info := sdktest.DecodeJSON[Info](t, sdktest.Do(t, app, sdktest.Request("GET", "/containers/"+res.ID, nil, anna)))
+	if want := []Label{{Key: "App", Value: "web"}, {Key: "empty"}, {Key: "tier", Value: "front"}}; !reflect.DeepEqual(info.Spec.Labels, want) {
+		t.Fatalf("form labels %+v, want %+v", info.Spec.Labels, want)
+	}
+
+	reserved := toJSON(t, Spec{Name: dockertest.Name(t, "labels"), Image: dockertest.Busybox, Command: "sleep 300",
+		Labels: []Label{{Key: "app", Value: "web"}, {Key: "com.docker.compose.project", Value: "e2e"}}})
+	resp = sdktest.Do(t, app, sdktest.Request("POST", "/containers", strings.NewReader(reserved), anna))
+	if raw := readAll(t, resp); resp.StatusCode != 400 || !strings.Contains(raw, `"field":"labels.1.key"`) {
+		t.Fatalf("a label of Docker's namespace: %d %s, want 400 for the field labels.1.key", resp.StatusCode, raw)
+	}
+}
+
+func TestCreateWithLimitsAgainstDaemon(t *testing.T) {
+	cli := dockertest.Live(t)
+	dockertest.Pull(t, cli, dockertest.Busybox)
+	app := testApp(cli)
+	name := dockertest.Name(t, "limits")
+	body := toJSON(t, Spec{Name: name, Image: dockertest.Busybox, Command: "sleep 300",
+		Resources: Resources{Memory: 64 << 20, CPUs: 0.5}, Start: true})
+	resp := sdktest.Do(t, app, sdktest.Request("POST", "/containers", strings.NewReader(body), anna))
+	res := sdktest.DecodeJSON[CreateResult](t, resp)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create: %d %+v", resp.StatusCode, res)
+	}
+	dockertest.RemoveContainerAtEnd(t, cli, res.ID)
+	got, err := cli.ContainerInspect(context.Background(), res.ID, client.ContainerInspectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := got.Container.HostConfig; h.Memory != 64<<20 || h.NanoCPUs != 500_000_000 {
+		t.Fatalf("limits %d %d (warnings %v)", h.Memory, h.NanoCPUs, res.Warnings)
+	}
+	info := sdktest.DecodeJSON[Info](t, sdktest.Do(t, app, sdktest.Request("GET", "/containers/"+res.ID, nil, anna)))
+	if info.Spec.Resources != (Resources{Memory: 64 << 20, CPUs: 0.5}) {
+		t.Fatalf("form resources %+v", info.Spec.Resources)
+	}
+}

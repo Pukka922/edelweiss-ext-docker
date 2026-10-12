@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, waitFor } from "@solidjs/testing-library";
 import { createSignal, Show } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { info } from "../test/fixtures";
+import type { ContainerInfo } from "../api";
+import { info, labelled } from "../test/fixtures";
 import { json, mount, settle, stubEventSource, stubFetch } from "../test/mount";
 import { ContainerDetail } from "./ContainerDetail";
 
@@ -24,10 +25,26 @@ function withState(status: string, running: boolean) {
   return { ...info, container: { ...info.container, state: { ...info.container.state, status, running } } };
 }
 
+/** Mounts the detail page of the container web, answering with detail, once its heading is there. */
+async function mountDetail(detail: ContainerInfo, locale?: "en" | "de") {
+  stubEventSource();
+  stubFetch({ "GET /containers/web": () => json(200, detail) });
+  const view = mount(() => <ContainerDetail params={{ id: "web" }} />, { path: "/containers/web", locale });
+  await view.findByRole("heading", { name: "web" });
+  return view;
+}
+
+/** The labels of the rows of the overview whose value is text. */
+function rowsSaying(view: ReturnType<typeof mount>, text: string) {
+  return view
+    .queryAllByText(text)
+    .map((value) => value.closest("dd")?.previousElementSibling?.textContent ?? "");
+}
+
 describe("ContainerDetail", () => {
   it("shows the overview", async () => {
     stubEventSource();
-    stubFetch({ "GET /containers/web": () => json(200, info) });
+    stubFetch({ "GET /containers/web": () => json(200, labelled) });
     const view = mount(() => <ContainerDetail params={{ id: "web" }} />, { path: "/containers/web" });
     expect(await view.findByRole("heading", { name: "web" })).toBeTruthy();
     expect(view.getByText("127.0.0.1:8080 → 80/tcp")).toBeTruthy();
@@ -35,17 +52,131 @@ describe("ContainerDetail", () => {
     expect(view.getByText("/srv/conf → /etc/nginx/conf.d (read-only)")).toBeTruthy();
     expect(view.getByText("bridge: 172.17.0.2")).toBeTruthy();
     expect(view.getByText("TZ=UTC")).toBeTruthy();
+    expect(view.getByText("app=web")).toBeTruthy();
     expect(view.getByText("unless stopped")).toBeTruthy();
-    expect(view.queryByText("none")).toBeNull();
+    // the fixture has no limits; every other row has something to show
+    expect(rowsSaying(view, "none")).toEqual(["Limits"]);
   });
 
-  it("says none for ports, volumes, networks and variables a container does not have", async () => {
+  it("says none for ports, volumes, networks, variables, labels and limits a container does not have", async () => {
     stubEventSource();
     const bare = { ...info, container: { ...info.container, ports: [], mounts: [], networks: [], env: [] } };
     stubFetch({ "GET /containers/web": () => json(200, bare) });
     const view = mount(() => <ContainerDetail params={{ id: "web" }} />, { path: "/containers/web" });
     await view.findByRole("heading", { name: "web" });
-    expect(view.getAllByText("none")).toHaveLength(4);
+    expect(view.getAllByText("none")).toHaveLength(6);
+    expect(rowsSaying(view, "none")).toEqual([
+      "Limits",
+      "Ports",
+      "Volumes",
+      "Networks",
+      "Environment",
+      "Labels",
+    ]);
+  });
+
+  describe("labels", () => {
+    it("shows the labels of the container, one key=value per line, in the row after the environment", async () => {
+      const view = await mountDetail(labelled);
+      const lines = view.getByText("app=web").closest("dd")!.querySelectorAll("div");
+      expect([...lines].map((line) => line.textContent)).toEqual(["app=web", "com.example.empty="]);
+      const labels = [...view.container.querySelectorAll("dt")].map((dt) => dt.textContent);
+      expect(labels.slice(-2)).toEqual(["Environment", "Labels"]);
+      expect(rowsSaying(view, "none")).toEqual(["Limits"]);
+    });
+
+    it("says none for a container without labels of its own", async () => {
+      const view = await mountDetail(info);
+      expect(rowsSaying(view, "none")).toEqual(["Limits", "Labels"]);
+    });
+
+    it("keeps the case of the keys and shows a value with an equals sign as it is", async () => {
+      const view = await mountDetail({
+        ...info,
+        spec: {
+          ...info.spec,
+          labels: [
+            { key: "Com.Example.Query", value: "a=b&c=d" },
+            { key: "app", value: "web" },
+          ],
+        },
+      });
+      expect(view.getByText("Com.Example.Query=a=b&c=d")).toBeTruthy();
+      expect(view.getByText("app=web")).toBeTruthy();
+    });
+
+    it("has the row in German too", async () => {
+      const view = await mountDetail(labelled, "de");
+      expect(view.getByText("Labels")).toBeTruthy();
+      expect(view.getByText("app=web")).toBeTruthy();
+    });
+  });
+
+  describe("limits", () => {
+    const MiB = 2 ** 20;
+    // the labelled container: its Labels row has something to show, so that "none" is only ever about the limits
+    const withLimits = (resources: { memory: number; cpus: number }) => ({
+      ...labelled,
+      spec: { ...labelled.spec, resources },
+    });
+
+    it("shows the limits, or none", async () => {
+      const view = await mountDetail(withLimits({ memory: 512 * MiB, cpus: 1.5 }));
+      expect(view.getByText("Memory 512 MiB · CPU 1.5 cores")).toBeTruthy();
+      expect(rowsSaying(view, "none")).toEqual([]);
+      cleanup();
+      const none = await mountDetail(labelled);
+      expect(rowsSaying(none, "none")).toEqual(["Limits"]);
+    });
+
+    it.each([
+      ["a memory limit alone", { memory: 256 * MiB, cpus: 0 }, "Memory 256 MiB"],
+      ["a CPU limit alone", { memory: 0, cpus: 0.25 }, "CPU 0.25 cores"],
+      ["a memory limit in GiB", { memory: 2 * 2 ** 30, cpus: 2 }, "Memory 2 GiB · CPU 2 cores"],
+    ])("shows %s without the other", async (_what, resources, text) => {
+      const view = await mountDetail(withLimits(resources));
+      expect(view.getByText(text)).toBeTruthy();
+      expect(rowsSaying(view, "none")).toEqual([]);
+    });
+
+    it("writes the limits in German with a decimal comma", async () => {
+      const view = await mountDetail(withLimits({ memory: 512 * MiB, cpus: 1.5 }), "de");
+      expect(view.getByText("Limits")).toBeTruthy();
+      expect(view.getByText("Speicher 512 MiB · CPU 1,5 Kerne")).toBeTruthy();
+    });
+
+    // one core is "1 core" / "1 Kern", more and fractions are the plural
+    it.each<["en" | "de", number, string]>([
+      ["en", 1, "CPU 1 core"],
+      ["en", 2, "CPU 2 cores"],
+      ["en", 0.5, "CPU 0.5 cores"],
+      ["de", 1, "CPU 1 Kern"],
+      ["de", 2, "CPU 2 Kerne"],
+      ["de", 0.5, "CPU 0,5 Kerne"],
+    ])("writes the CPU limit in the plural form (%s, %d)", async (locale, cpus, text) => {
+      const view = await mountDetail(withLimits({ memory: 0, cpus }), locale);
+      expect(view.getByText(text)).toBeTruthy();
+    });
+  });
+
+  it("shows each action as an icon in front of its text; the icon is hidden from assistive technology", async () => {
+    stubEventSource();
+    for (const [detail, names] of [
+      [info, ["Stop", "Restart", "Edit", "Delete"]],
+      [withState("exited", false), ["Start", "Edit", "Delete"]],
+    ] as const) {
+      stubFetch({ "GET /containers/web": () => json(200, detail) });
+      const view = mount(() => <ContainerDetail params={{ id: "web" }} />, { path: "/containers/web" });
+      await view.findByRole("heading", { name: "web" });
+      for (const name of names) {
+        const button = view.getByRole("button", { name }); // the name is the text alone
+        const icon = button.querySelector("svg");
+        expect(icon?.getAttribute("aria-hidden")).toBe("true");
+        expect(button.firstElementChild).toBe(icon);
+        expect(button.textContent?.trim()).toBe(name);
+      }
+      cleanup();
+    }
   });
 
   it("goes to the form and back to the list after deleting", async () => {

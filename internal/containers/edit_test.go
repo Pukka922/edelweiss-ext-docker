@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -14,12 +16,16 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 
 	"github.com/Pukka922/edelweiss-ext-docker/internal/dockertest"
 	"github.com/Pukka922/edelweiss/sdk"
 	"github.com/Pukka922/edelweiss/sdk/sdktest"
 )
+
+// updateWarnings are the warnings the fake's ContainerUpdate answers with.
+var updateWarnings []string
 
 // editFake answers like the daemon for the container of inspected(); calls are recorded as "verb object …" with "old"
 // for the container being edited and "new" for the one created, and every call named in fail fails. A call with a
@@ -59,7 +65,14 @@ func editFake(fail ...string) (*dockertest.Fake, *[]string) {
 			return client.ContainerRenameResult{}, step(ctx, "rename "+name(id)+" "+o.NewName)
 		},
 		ContainerUpdateFn: func(ctx context.Context, id string, o client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
-			return client.ContainerUpdateResult{}, step(ctx, "update "+name(id)+" "+string(o.RestartPolicy.Name))
+			call := "update " + name(id)
+			if o.RestartPolicy != nil {
+				call += " " + string(o.RestartPolicy.Name)
+			}
+			if o.Resources != nil {
+				call += fmt.Sprintf(" memory=%d swap=%d nano=%d", o.Resources.Memory, o.Resources.MemorySwap, o.Resources.NanoCPUs)
+			}
+			return client.ContainerUpdateResult{Warnings: updateWarnings}, step(ctx, call)
 		},
 		ContainerCreateFn: func(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
 			if err := step(ctx, "create "+o.Name); err != nil {
@@ -219,6 +232,131 @@ func TestEditIgnoresTheOrderOfTheRows(t *testing.T) {
 	}
 }
 
+// carrying makes the container that f answers for carry the given labels (inspected() has app=web, and maintainer=NGINX
+// of its image) and returns it.
+func carrying(f *dockertest.Fake, labels map[string]string) container.InspectResponse {
+	c, _ := inspected()
+	c.Config.Labels = labels
+	f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+		return client.ContainerInspectResult{Container: c}, nil
+	}
+	return c
+}
+
+// recordCreates makes f remember the labels of every container it is asked to create (as copies).
+func recordCreates(f *dockertest.Fake) *[]map[string]string {
+	var got []map[string]string
+	inner := f.ContainerCreateFn
+	f.ContainerCreateFn = func(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+		got = append(got, maps.Clone(o.Config.Labels))
+		return inner(ctx, o)
+	}
+	return &got
+}
+
+// Docker cannot change the labels of a container: a change of the labels recreates it, with the labels of the form and
+// Docker's own, which the form does not show.
+func TestEditRecreatesForALabelChange(t *testing.T) {
+	const project = "com.docker.compose.project"
+	cases := []struct {
+		name   string
+		change func(*Spec) // the form shows app=web and tier=front
+		want   map[string]string
+	}{
+		{"a label added", func(s *Spec) { s.Labels = append(s.Labels, Label{Key: "stage", Value: "prod"}) },
+			map[string]string{"app": "web", "tier": "front", "stage": "prod", project: "shop"}},
+		{"a label removed", func(s *Spec) { s.Labels = s.Labels[:1] }, map[string]string{"app": "web", project: "shop"}},
+		{"a value changed", func(s *Spec) { s.Labels[0].Value = "api" }, map[string]string{"app": "api", "tier": "front", project: "shop"}},
+		{"a key renamed", func(s *Spec) { s.Labels[1].Key = "layer" }, map[string]string{"app": "web", "layer": "front", project: "shop"}},
+		{"a value emptied", func(s *Spec) { s.Labels[1].Value = "" }, map[string]string{"app": "web", "tier": "", project: "shop"}},
+		{"all removed, as an empty list", func(s *Spec) { s.Labels = []Label{} }, map[string]string{project: "shop"}},
+		{"all removed, as no list", func(s *Spec) { s.Labels = nil }, map[string]string{project: "shop"}},
+	}
+	for _, tc := range cases {
+		f, calls := editFake()
+		creates := recordCreates(f)
+		c := carrying(f, map[string]string{"maintainer": "NGINX", "app": "web", "tier": "front", project: "shop"})
+		_, img := inspected()
+		form := SpecOf(c, img)
+		if !slices.Equal(form.Labels, []Label{{Key: "app", Value: "web"}, {Key: "tier", Value: "front"}}) {
+			t.Fatalf("%s: the form shows %+v", tc.name, form.Labels)
+		}
+		tc.change(&form)
+		res, err := New(f).Edit(context.Background(), "web", form)
+		if err != nil || !res.Recreated || res.ID != "new" {
+			t.Errorf("%s: %+v %v", tc.name, res, err)
+		}
+		if !slices.Equal(*calls, recreated()) {
+			t.Errorf("%s: calls %v", tc.name, *calls)
+		}
+		if len(*creates) != 1 || !maps.Equal((*creates)[0], tc.want) {
+			t.Errorf("%s: the new container gets the labels %q, want %q", tc.name, *creates, tc.want)
+		}
+	}
+}
+
+// A change of the labels alongside name, restart policy or limits is not an edit by update: the container is recreated
+// (under the new name, with the new policy and limits), and nothing is updated in place.
+func TestEditWithALabelChangeAndDirectChangesRecreates(t *testing.T) {
+	f, calls := editFake()
+	creates := recordCreates(f)
+	c := carrying(f, map[string]string{"app": "web"})
+	_, img := inspected()
+	form := SpecOf(c, img)
+	form.Name, form.Restart, form.Resources = "web2", Restart{Policy: "always"}, Resources{Memory: 512 << 20}
+	form.Labels = append(form.Labels, Label{Key: "tier", Value: "front"})
+	res, err := New(f).Edit(context.Background(), "web", form)
+	if err != nil || !res.Recreated {
+		t.Fatalf("%+v %v", res, err)
+	}
+	want := []string{"rename old web-edelweiss-old", "create web2", "connect back new", "stop old", "start new", "remove old force=false volumes=false"}
+	if !slices.Equal(*calls, want) {
+		t.Fatalf("calls\n %v\nwant\n %v", *calls, want)
+	}
+	if len(*creates) != 1 || !maps.Equal((*creates)[0], map[string]string{"app": "web", "tier": "front"}) {
+		t.Fatalf("labels %q", *creates)
+	}
+}
+
+// The order of the labels is no change, and neither is a missing list for none; Docker's own labels, which the form does
+// not show, are no change either. So these edits stay direct, and without any other change they ask Docker for nothing.
+func TestEditIgnoresTheOrderOfTheLabelsAndDockersOwn(t *testing.T) {
+	const compose = "com.docker.compose.project"
+	own := map[string]string{"maintainer": "NGINX", "zone": "1", "app": "web", "Tier": "front", compose: "shop"}
+	cases := []struct {
+		name   string
+		labels map[string]string // of the container
+		change func(*Spec)
+		calls  string
+	}{
+		{"reordered", own, func(s *Spec) { slices.Reverse(s.Labels) }, ""},
+		{"reordered and renamed", own, func(s *Spec) { slices.Reverse(s.Labels); s.Name = "web2" }, "rename old web2"},
+		{"reordered and another restart policy", own, func(s *Spec) { slices.Reverse(s.Labels); s.Restart = Restart{Policy: "always"} },
+			"update old always"},
+		{"a blank around a key", own, func(s *Spec) { s.Labels[0].Key = "  " + s.Labels[0].Key + " " }, ""},
+		{"Docker's own labels and a rename", map[string]string{compose: "shop", "com.docker.compose.service": "web"},
+			func(s *Spec) { s.Name = "web2" }, "rename old web2"},
+		{"only the image's labels, none in the form", map[string]string{"maintainer": "NGINX"},
+			func(s *Spec) { s.Labels = nil; s.Name = "web2" }, "rename old web2"},
+		{"no labels at all, an empty list", nil, func(s *Spec) { s.Labels = []Label{}; s.Name = "web2" }, "rename old web2"},
+		{"no labels at all, no list", nil, func(s *Spec) { s.Labels = nil }, ""},
+	}
+	for _, tc := range cases {
+		f, calls := editFake()
+		c := carrying(f, tc.labels)
+		_, img := inspected()
+		form := SpecOf(c, img)
+		tc.change(&form)
+		res, err := New(f).Edit(context.Background(), "web", form)
+		if err != nil || res.Recreated || res.ID != c.ID {
+			t.Errorf("%s: %+v %v", tc.name, res, err)
+		}
+		if got := strings.Join(*calls, ","); got != tc.calls {
+			t.Errorf("%s: calls\n %s\nwant\n %s", tc.name, got, tc.calls)
+		}
+	}
+}
+
 // A command that splits into the same words is no change, whatever the spacing and quoting; one that does not split is.
 func TestEditComparesCommandsAsWords(t *testing.T) {
 	cases := []struct {
@@ -300,6 +438,206 @@ func TestEditDirectUndoesTheRename(t *testing.T) {
 	}
 }
 
+// recordUpdates makes f remember the options of every ContainerUpdate (as copies), besides what the fake does with them.
+func recordUpdates(f *dockertest.Fake) *[]client.ContainerUpdateOptions {
+	var got []client.ContainerUpdateOptions
+	inner := f.ContainerUpdateFn
+	f.ContainerUpdateFn = func(ctx context.Context, id string, o client.ContainerUpdateOptions) (client.ContainerUpdateResult, error) {
+		var cp client.ContainerUpdateOptions
+		if o.Resources != nil {
+			r := *o.Resources
+			cp.Resources = &r
+		}
+		if o.RestartPolicy != nil {
+			p := *o.RestartPolicy
+			cp.RestartPolicy = &p
+		}
+		got = append(got, cp)
+		return inner(ctx, id, o)
+	}
+	return &got
+}
+
+// Changing one limit sends the other as it is, with the swap Docker's rules give: the update carries both limits, and
+// nothing but them (no restart policy, which did not change). Docker reads a 0 in an update as "unchanged", but the edit
+// does not rely on that.
+func TestEditOfOneLimitSendsTheOtherAsItIs(t *testing.T) {
+	const half = 500_000_000 // 0.5 CPUs
+	cases := []struct {
+		name     string
+		haveSwap int64 // MemorySwap of the container (memory 256 MiB, 0.5 CPUs)
+		form     Resources
+		want     container.Resources
+	}{
+		{"memory only: the CPU limit stays", 0, Resources{Memory: 512 << 20, CPUs: 0.5},
+			container.Resources{Memory: 512 << 20, MemorySwap: 1024 << 20, NanoCPUs: half}},
+		{"CPUs only: the memory limit stays, swap as Docker reports its default", 512 << 20, Resources{Memory: 256 << 20, CPUs: 1},
+			container.Resources{Memory: 256 << 20, MemorySwap: 512 << 20, NanoCPUs: 1_000_000_000}},
+		{"CPUs only: no swap limit reported", 0, Resources{Memory: 256 << 20, CPUs: 1},
+			container.Resources{Memory: 256 << 20, MemorySwap: 512 << 20, NanoCPUs: 1_000_000_000}},
+		{"CPUs only: a custom swap limit stays", 300 << 20, Resources{Memory: 256 << 20, CPUs: 1},
+			container.Resources{Memory: 256 << 20, MemorySwap: 300 << 20, NanoCPUs: 1_000_000_000}},
+		{"memory only: a custom swap limit above the new memory stays", 300 << 20, Resources{Memory: 280 << 20, CPUs: 0.5},
+			container.Resources{Memory: 280 << 20, MemorySwap: 300 << 20, NanoCPUs: half}},
+		{"CPUs only: unlimited swap stays", -1, Resources{Memory: 256 << 20, CPUs: 1},
+			container.Resources{Memory: 256 << 20, MemorySwap: -1, NanoCPUs: 1_000_000_000}},
+		{"memory only: unlimited swap stays", -1, Resources{Memory: 512 << 20, CPUs: 0.5},
+			container.Resources{Memory: 512 << 20, MemorySwap: -1, NanoCPUs: half}},
+	}
+	for _, tc := range cases {
+		f, calls := editFake()
+		updates := recordUpdates(f)
+		c, img := inspected()
+		c.HostConfig.NanoCPUs, c.HostConfig.MemorySwap = half, tc.haveSwap
+		f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: c}, nil
+		}
+		s := SpecOf(c, img)
+		s.Resources = tc.form
+		res, err := New(f).Edit(context.Background(), "web", s.Normalize())
+		if err != nil || res.Recreated || res.ID != c.ID {
+			t.Errorf("%s: %+v %v", tc.name, res, err)
+			continue
+		}
+		if len(*calls) != 1 || len(*updates) != 1 {
+			t.Errorf("%s: calls %v, want the one update", tc.name, *calls)
+			continue
+		}
+		if u := (*updates)[0]; u.RestartPolicy != nil || !reflect.DeepEqual(u.Resources, &tc.want) {
+			sent := "no resources"
+			if u.Resources != nil {
+				sent = fmt.Sprintf("memory=%d swap=%d nano=%d", u.Resources.Memory, u.Resources.MemorySwap, u.Resources.NanoCPUs)
+			}
+			t.Errorf("%s: update sent %s and restart policy %+v, want memory=%d swap=%d nano=%d and no policy", tc.name, sent, u.RestartPolicy,
+				tc.want.Memory, tc.want.MemorySwap, tc.want.NanoCPUs)
+		}
+	}
+}
+
+func TestEditChangesTheLimitsDirectly(t *testing.T) {
+	f, calls := editFake()
+	c, img := inspected() // Memory 256 MiB, MemorySwap 0
+	s := SpecOf(c, img)
+	s.Resources = Resources{Memory: 512 << 20, CPUs: 1.5}
+	updateWarnings = []string{"Your kernel does not support swap limit capabilities"}
+	t.Cleanup(func() { updateWarnings = nil })
+	res, err := New(f).Edit(context.Background(), "web", s.Normalize())
+	if err != nil || res.Recreated || res.ID != c.ID || len(res.Warnings) != 1 {
+		t.Fatalf("edit: %+v %v", res, err)
+	}
+	if want := fmt.Sprintf("update old memory=%d swap=%d nano=1500000000", 512<<20, 1024<<20); strings.Join(*calls, ",") != want {
+		t.Fatalf("calls %v, want %s", *calls, want)
+	}
+}
+
+func TestEditRecreatesToRemoveALimit(t *testing.T) {
+	for name, r := range map[string]Resources{"memory": {Memory: 0, CPUs: 1}, "cpus": {Memory: 256 << 20, CPUs: 0}} {
+		f, calls := editFake()
+		c, img := inspected()
+		c.HostConfig.NanoCPUs = 1_000_000_000
+		f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: c}, nil
+		}
+		s := SpecOf(c, img)
+		s.Resources = r
+		res, err := New(f).Edit(context.Background(), "web", s.Normalize())
+		if err != nil || !res.Recreated {
+			t.Fatalf("%s: %+v %v", name, res, err)
+		}
+		if !slices.Equal(*calls, recreated()) {
+			t.Fatalf("%s: calls %v", name, *calls)
+		}
+	}
+}
+
+// The limits are compared as whole units (Docker's NanoCPUs), never as floats: 0.1+0.2 is 0.30000000000000004 as a float,
+// yet the same limit as 0.3. It is no change, so it neither recreates nor asks Docker to update anything.
+func TestEditComparesCPULimitsAsWholeNanoCPUs(t *testing.T) {
+	a, b := 0.1, 0.2
+	sum := a + b
+	if sum == 0.3 {
+		t.Fatal("the test needs a sum that is not 0.3 as a float")
+	}
+	cases := []struct {
+		name  string
+		name2 string // the new name of the container ("" keeps it)
+		cpus  float64
+		calls string
+	}{
+		{"the same limit as a float sum", "", sum, ""},
+		{"the same limit, plain", "", 0.3, ""},
+		{"the same limit and a rename: the rename alone", "web2", sum, "rename old web2"},
+	}
+	for _, tc := range cases {
+		f, calls := editFake()
+		c, img := inspected()
+		c.HostConfig.NanoCPUs = 300_000_000
+		f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: c}, nil
+		}
+		s := SpecOf(c, img)
+		if s.Resources.CPUs != 0.3 {
+			t.Fatalf("%s: the container shows %v CPUs, want 0.3", tc.name, s.Resources.CPUs)
+		}
+		s.Resources.CPUs = tc.cpus
+		if tc.name2 != "" {
+			s.Name = tc.name2
+		}
+		res, err := New(f).Edit(context.Background(), "web", s.Normalize())
+		if err != nil || res.Recreated || res.ID != c.ID {
+			t.Errorf("%s: %+v %v", tc.name, res, err)
+		}
+		if got := strings.Join(*calls, ","); got != tc.calls {
+			t.Errorf("%s: calls %q, want %q", tc.name, got, tc.calls)
+		}
+	}
+}
+
+func TestEditRefusesALimitAboveACustomSwapBeforeChangingAnything(t *testing.T) {
+	f, calls := editFake()
+	c, img := inspected()
+	c.HostConfig.MemorySwap = 300 << 20
+	f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+		return client.ContainerInspectResult{Container: c}, nil
+	}
+	s := SpecOf(c, img)
+	s.Name, s.Resources.Memory = "web2", 1<<30
+	_, err := New(f).Edit(context.Background(), "web", s.Normalize())
+	if apiErr := asAPIError(err); apiErr == nil || apiErr.Status != 400 || apiErr.Code != "invalid_container_spec" {
+		t.Fatalf("err %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("calls %v, want none", *calls)
+	}
+}
+
+func TestEditDirectUndoesTheRenameWhenDockerRefusesTheLimits(t *testing.T) {
+	f, calls := editFake(fmt.Sprintf("update old memory=%d swap=%d nano=500000000", 256<<20, 512<<20))
+	c, img := inspected()
+	s := SpecOf(c, img)
+	s.Name, s.Resources.CPUs = "web2", 0.5
+	_, err := New(f).Edit(context.Background(), "web", s.Normalize())
+	apiErr := asAPIError(err)
+	if apiErr == nil || !strings.Contains(apiErr.Message, "failed") || !strings.Contains(apiErr.Message, "the rename to web2 was undone") {
+		t.Fatalf("err %v", err)
+	}
+	want := fmt.Sprintf("rename old web2,update old memory=%d swap=%d nano=500000000,rename old web", 256<<20, 512<<20)
+	if got := strings.Join(*calls, ","); got != want {
+		t.Fatalf("calls\n %s\nwant\n %s", got, want)
+	}
+}
+
+func TestRecreatePassesDockersWarningsOn(t *testing.T) {
+	f, _ := editFake()
+	f.ContainerCreateFn = func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+		return client.ContainerCreateResult{ID: "new", Warnings: []string{"memory limit not supported"}}, nil
+	}
+	res, err := New(f).Edit(context.Background(), "web", changed())
+	if err != nil || !res.Recreated || !slices.Equal(res.Warnings, []string{"memory limit not supported"}) {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
 func TestRecreate(t *testing.T) {
 	ok := recreated()
 	cases := []struct {
@@ -319,8 +657,19 @@ func TestRecreate(t *testing.T) {
 		{[]string{"remove old force=false volumes=false"}, ok, "", true, true},
 		{[]string{"start new", "rename old web"}, append(ok[:5:5], "remove new force=true volumes=false", "rename old web", "start old"), "recreate_failed", false, false},
 	}
+	// Docker's warnings of the creation reach the result of a recreation that succeeds, also when the old container
+	// cannot be removed (then next to Warning)
+	createWarnings := []string{"memory limit not supported"}
 	for _, tc := range cases {
 		f, calls := editFake(tc.fail...)
+		create := f.ContainerCreateFn
+		f.ContainerCreateFn = func(ctx context.Context, o client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			res, err := create(ctx, o)
+			if err == nil {
+				res.Warnings = createWarnings
+			}
+			return res, err
+		}
 		res, err := New(f).Edit(context.Background(), "web", changed())
 		if got := strings.Join(*calls, ","); got != strings.Join(tc.calls, ",") {
 			t.Errorf("fail %v: calls\n %s\nwant\n %s", tc.fail, got, strings.Join(tc.calls, ","))
@@ -333,6 +682,8 @@ func TestRecreate(t *testing.T) {
 			t.Errorf("fail %v: error %v, want %s", tc.fail, err, tc.code)
 		case tc.code == "" && (res.Recreated != tc.recreated || (res.Warning != "") != tc.warning || res.ID != "new"):
 			t.Errorf("fail %v: result %+v", tc.fail, res)
+		case tc.code == "" && !slices.Equal(res.Warnings, createWarnings):
+			t.Errorf("fail %v: warnings %v, want Docker's %v", tc.fail, res.Warnings, createWarnings)
 		}
 		if tc.code == "recreate_failed" && !strings.Contains(err.Error(), "web-edelweiss-old") {
 			t.Errorf("the message must say where the old container is: %v", err)
@@ -511,6 +862,81 @@ func TestEditRoute(t *testing.T) {
 	resp = sdktestDo(t, testApp(f), "PUT", "/containers/web", bad)
 	if raw := readAll(t, resp); resp.StatusCode != 400 || !strings.Contains(raw, "invalid_container_spec") || !strings.Contains(raw, `"field":"name"`) {
 		t.Fatalf("invalid: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// A CPU limit above the CPUs of the host is refused (400, field resources.cpus) before anything changes, the rename that
+// comes with it included; one within them goes through, and docker info is asked for once per edit.
+func TestEditRouteChecksACPULimitAgainstTheHost(t *testing.T) {
+	f, calls := editFake()
+	infos := 0
+	f.InfoFn = func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+		infos++
+		return client.SystemInfoResult{Info: system.Info{NCPU: 2}}, nil
+	}
+	app := testApp(f)
+	c, img := inspected()
+	for _, tc := range []struct {
+		cpus   float64
+		status int
+	}{{0.01, 200}, {2, 200}, {2.01, 400}, {3, 400}} {
+		infos, *calls = 0, nil
+		s := SpecOf(c, img)
+		s.Name, s.Resources.CPUs = "web2", tc.cpus
+		resp := sdktestDo(t, app, "PUT", "/containers/web", toJSONUnit(t, s.Normalize()))
+		raw := readAll(t, resp)
+		if resp.StatusCode != tc.status || infos != 1 {
+			t.Errorf("cpus %v: %d (want %d), docker info asked for %d times (want 1): %s", tc.cpus, resp.StatusCode, tc.status, infos, raw)
+		}
+		if tc.status == 400 {
+			if !strings.Contains(raw, `"invalid_container_spec"`) || !strings.Contains(raw, `"field":"resources.cpus"`) {
+				t.Errorf("cpus %v: %s", tc.cpus, raw)
+			}
+			if len(*calls) != 0 {
+				t.Errorf("cpus %v: calls %v, want none: a refused form changes nothing", tc.cpus, *calls)
+			}
+		} else if len(*calls) != 2 || (*calls)[0] != "rename old web2" || !strings.HasPrefix((*calls)[1], "update old memory=") {
+			t.Errorf("cpus %v: calls %v, want the rename and the update", tc.cpus, *calls)
+		}
+	}
+}
+
+// Only a CPU limit needs the number of CPUs of the host: without one, docker info is not asked for, whether the edit is
+// direct, recreates (a removed limit) or changes nothing.
+func TestEditRouteWithoutACPULimitDoesNotAskForTheHostInfo(t *testing.T) {
+	cases := []struct {
+		name      string
+		haveNano  int64 // the CPU limit of the container (inspected() has none)
+		change    func(*Spec)
+		recreated bool
+	}{
+		{"a memory limit changed", 0, func(s *Spec) { s.Resources.Memory = 512 << 20 }, false},
+		{"a rename", 0, func(s *Spec) { s.Name = "web2" }, false},
+		{"nothing changed", 0, func(*Spec) {}, false},
+		{"the memory limit removed", 0, func(s *Spec) { s.Resources.Memory = 0 }, true},
+		{"the CPU limit removed", 1_000_000_000, func(s *Spec) { s.Resources.CPUs = 0 }, true},
+	}
+	for _, tc := range cases {
+		f, _ := editFake()
+		c, img := inspected()
+		c.HostConfig.NanoCPUs = tc.haveNano
+		f.ContainerInspectFn = func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+			return client.ContainerInspectResult{Container: c}, nil
+		}
+		f.InfoFn = func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			t.Errorf("%s: docker info was asked for, though the form has no CPU limit", tc.name)
+			return client.SystemInfoResult{}, nil
+		}
+		s := SpecOf(c, img)
+		tc.change(&s)
+		if s.Resources.CPUs != 0 {
+			t.Fatalf("%s: the form must have no CPU limit: %+v", tc.name, s.Resources)
+		}
+		resp := sdktestDo(t, testApp(f), "PUT", "/containers/web", toJSONUnit(t, s.Normalize()))
+		raw := readAll(t, resp)
+		if resp.StatusCode != 200 || strings.Contains(raw, `"recreated":true`) != tc.recreated {
+			t.Errorf("%s: %d %s, want recreated=%v", tc.name, resp.StatusCode, raw, tc.recreated)
+		}
 	}
 }
 

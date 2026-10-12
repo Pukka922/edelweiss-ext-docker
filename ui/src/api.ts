@@ -8,6 +8,10 @@ export interface Status {
   apiVersion?: string;
   os?: string;
   arch?: string;
+  /** CPUs of the Docker host. */
+  cpus?: number;
+  /** Memory of the Docker host in bytes. */
+  memory?: number;
   admin: boolean;
   message?: string;
 }
@@ -57,11 +61,24 @@ export interface EnvVar {
   value: string;
 }
 
+/** A label of the container itself: Docker's own (com.docker.*, ...) and those of the image are not in the form. */
+export interface Label {
+  key: string;
+  value: string;
+}
+
 export type Policy = "no" | "always" | "unless-stopped" | "on-failure";
 
 export interface Restart {
   policy: Policy;
   maxRetries: number;
+}
+
+export interface Resources {
+  /** Memory limit in bytes; 0: no limit. */
+  memory: number;
+  /** CPU limit in cores (1.5); 0: no limit. */
+  cpus: number;
 }
 
 export interface Spec {
@@ -71,9 +88,11 @@ export interface Spec {
   ports: Port[];
   mounts: Mount[];
   env: EnvVar[];
+  labels: Label[];
   network: string;
   restart: Restart;
   privileged: boolean;
+  resources: Resources;
   start?: boolean;
 }
 
@@ -124,6 +143,8 @@ export interface CreateResult {
 export interface EditResult {
   id: string;
   recreated: boolean;
+  /** Docker's warnings about the new configuration (limits the kernel cannot enforce, …). */
+  warnings?: string[];
   warning?: string;
 }
 

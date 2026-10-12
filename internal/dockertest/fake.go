@@ -22,6 +22,7 @@ import (
 type Fake struct {
 	PingFn              func(context.Context, client.PingOptions) (client.PingResult, error)
 	ServerVersionFn     func(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error)
+	InfoFn              func(context.Context, client.InfoOptions) (client.SystemInfoResult, error)
 	ContainerListFn     func(context.Context, client.ContainerListOptions) (client.ContainerListResult, error)
 	ContainerInspectFn  func(context.Context, string, client.ContainerInspectOptions) (client.ContainerInspectResult, error)
 	ContainerCreateFn   func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error)
@@ -71,6 +72,13 @@ func (f *Fake) ServerVersion(ctx context.Context, o client.ServerVersionOptions)
 		return client.ServerVersionResult{}, notFaked("ServerVersion")
 	}
 	return f.ServerVersionFn(ctx, o)
+}
+
+func (f *Fake) Info(ctx context.Context, o client.InfoOptions) (client.SystemInfoResult, error) {
+	if f.InfoFn == nil {
+		return client.SystemInfoResult{}, notFaked("Info")
+	}
+	return f.InfoFn(ctx, o)
 }
 
 func (f *Fake) ContainerList(ctx context.Context, o client.ContainerListOptions) (client.ContainerListResult, error) {

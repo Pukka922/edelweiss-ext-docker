@@ -1,13 +1,13 @@
 {
   "id": "docker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "apiVersion": 1,
   "name": { "de": "Docker", "en": "Docker" },
   "description": {
     "de": "Container, Images, Volumes, Netzwerke und Registries verwalten",
     "en": "Manage containers, images, volumes, networks and registries"
   },
-  "menu": { "section": "containers", "order": 10, "icon": "icon.svg" },
+  "menu": { "section": "virtualization", "order": 10, "icon": "icon.svg" },
   "ui": { "entry": "index.js", "styles": ["style.css"], "locales": "locales" },
   "requiresAdmin": false,
   "requires": { "apk": ["docker"] }

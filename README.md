@@ -4,12 +4,13 @@
 > more comfortably. Anyone is welcome to use it, but at their own risk.
 
 Docker management for [edelweiss](https://github.com/Pukka922/edelweiss), the web administration interface for Alpine
-Linux, in the manner of a small Portainer. Its page **Docker** (menu section Containers) manages the local Docker
+Linux, in the manner of a small Portainer. Its page **Docker** (menu section Containers & VMs) manages the local Docker
 daemon:
 
 - **Containers**: list with state and published ports; create and edit (image, command, ports, volumes or bind mounts,
-  environment, network, restart policy, privileged); start, stop, restart, delete. Per container its logs (live),
-  statistics (CPU, memory, network, disk) and a console: a shell in the container, in the browser.
+  environment, labels, network, restart policy, memory and CPU limits, privileged); start, stop, restart, delete. Per
+  container its logs (live), statistics (CPU, memory, network, disk) and a console: a shell in the container, in the
+  browser.
 - **Images**: which containers use them; pull from Docker Hub or a stored registry, with progress; delete; remove all
   unused images.
 - **Volumes** and **networks**: create (with driver options, for example NFS volumes or macvlan networks), delete;
@@ -18,14 +19,18 @@ daemon:
 
 Container names start with a letter or digit and have at least two characters (Docker's rule).
 
-Editing a container changes its name and restart policy directly. Every other change recreates it: the old container is
-replaced by a new one with the same name, and its named and anonymous volumes keep their data. Settings the form does
-not show (memory limits, devices, capabilities, further networks and the like) are kept, and so is an explicit host IP
-such as `0.0.0.0`. The options of bind mounts and `-v` volumes (for example `rslave`, SELinux `z`/`Z`, `nocopy`) and
-host port ranges set outside edelweiss (an empty host port in the form keeps them) are kept while the mount (type,
-source, target) or the port (container port, protocol, host IP) stays the same. The defaults of the image (its
-environment, command, labels) are not copied, so a new image tag brings its own. If recreating fails, the old container
-is restored.
+Editing a container changes its name, restart policy and memory and CPU limits directly; removing a limit and every
+other change recreates it: the old container is replaced by a new one with the same name, and its named and anonymous
+volumes keep their data. Settings the form does not show (further resource settings such as a memory reservation,
+devices, capabilities, further networks and the like) are kept, and so is an explicit host IP such as `0.0.0.0`. A
+swap limit set outside edelweiss stays while it is at least the memory limit; a higher memory limit is refused. The
+options of bind mounts and `-v` volumes (for example `rslave`, SELinux `z`/`Z`, `nocopy`) and host port ranges set
+outside edelweiss (an empty host port in the form keeps them) are kept while the mount (type, source, target) or the
+port (container port, protocol, host IP) stays the same. Docker cannot change the labels of an existing container, so
+a change of a label recreates it; Docker's own labels (`com.docker.*`, `io.docker.*` and `org.dockerproject.*`, for
+example those of Docker Compose) are kept as they are, neither shown in the form nor accepted there. The defaults of
+the image (its environment, command, labels) are not copied, so a new image tag brings its own. If recreating fails,
+the old container is restored.
 
 Any edit, even of the name alone, recreates the container when its image tag now names a different image from the one
 it runs (for example after a pull elsewhere). The option **Pull the image again before saving** pulls first; if the pull
@@ -40,6 +45,8 @@ edelweiss SDKs.
 explains its parts.
 
 ## Requirements
+
+edelweiss 0.2.0 or newer (the menu section Containers & VMs); edelweiss 0.1.0 refuses the extension.
 
 Docker on the edelweiss host; as root:
 
@@ -67,7 +74,8 @@ Without either, the page explains both ways.
 - A registry without TLS (`http://`) also needs `"insecure-registries": ["<host>:<port>"]` in `/etc/docker/daemon.json`
   and `rc-service docker restart`. The extension does not change the daemon's configuration.
 - On a Raspberry Pi the kernel may not account memory per container; the statistics then show no memory figures. Add
-  `cgroup_enable=memory cgroup_memory=1` to `cmdline.txt` and reboot.
+  `cgroup_enable=memory cgroup_memory=1` to `cmdline.txt` and reboot. The same kernel setting is needed for memory
+  limits; without it Docker accepts the limit with a warning, which is shown after saving, and does not enforce it.
 
 ## Installation
 
@@ -91,7 +99,7 @@ make build                    # the UI, then static binaries for amd64 and arm64
 make test                     # Go unit tests against a fake Docker (race detector), vitest, the release guards (scripts/)
 make test-docker              # Go integration tests against a throwaway Docker daemon (see below)
 make lint                     # go vet, gofmt, Biome, TypeScript, actionlint
-make release VERSION=0.1.0    # release files in dist/: edelweiss-ext-docker_0.1.0_linux_<amd64|arm64>, checksums.txt
+make release VERSION=0.2.0    # release files in dist/: edelweiss-ext-docker_0.2.0_linux_<amd64|arm64>, checksums.txt
 ```
 
 `make test-docker` (`scripts/test-docker.sh`) never uses the Docker daemon of your machine for the tests: it starts a
@@ -140,11 +148,11 @@ To try the extension, start the edelweiss dev environment with its own Docker da
 ```sh
 make release
 mkdir -p ../edelweiss/build
-cp dist/edelweiss-ext-docker_0.1.0_linux_amd64 ../edelweiss/build/
+cp dist/edelweiss-ext-docker_0.2.0_linux_amd64 ../edelweiss/build/
 cd ../edelweiss
 make dev DOCKER=1
 docker compose -f dev/compose.yaml exec edelweiss /work/build/dev/edelweissd ext install \
-  /work/build/edelweiss-ext-docker_0.1.0_linux_amd64 --config /work/dev/edelweiss.dev.toml
+  /work/build/edelweiss-ext-docker_0.2.0_linux_amd64 --config /work/dev/edelweiss.dev.toml
 ```
 
 The running edelweissd picks the extension up within a moment. Install again after a change: that replaces the
@@ -208,36 +216,19 @@ The CI workflow (`.github/workflows/ci.yml`) runs `make lint test test-docker bu
 
 ## First publication
 
-Until edelweiss publishes its SDKs, this repository has no `ui/package-lock.json`, and `go.sum` has no entry for
-`github.com/Pukka922/edelweiss/sdk`. Its workflows fail until then. The order:
+edelweiss 0.2.0 is published, and this repository uses its SDKs: `go.sum` and `ui/package-lock.json` pin them,
+so `go get`, `go mod tidy` and `npm ci` work directly and the workflows build without an edelweiss checkout. What is
+left is the repository on GitHub:
 
-1. Publish edelweiss `v0.1.0` (its README, "Releasing"). Its release workflow attaches `edelweiss-sdk-0.1.0.tgz` and
-   sets the tag `sdk/v0.1.0`.
-2. Here, switch to the published SDKs and commit the lock data:
-
-   ```sh
-   rm -f go.work go.work.sum
-   rm -rf ui/node_modules
-   go get github.com/Pukka922/edelweiss/sdk@v0.1.0
-   go mod tidy
-   (cd ui && npm install)
-   make lint test test-docker build
-   git add go.mod go.sum ui/package-lock.json
-   git commit -m "build: use the published edelweiss sdks v0.1.0"
-   ```
-
-   If `go get` reports an unknown revision right after the edelweiss release, the module proxy has not seen the tag
-   yet. Wait a few minutes, or run `GOPROXY=direct go get github.com/Pukka922/edelweiss/sdk@v0.1.0`. From then on
-   `go get` and `go mod tidy` work directly, and `make tidy` is no longer needed.
-3. Create the public repository `Pukka922/edelweiss-ext-docker` on GitHub. Recommended before the first tag: a tag
+1. Create the public repository `Pukka922/edelweiss-ext-docker` on GitHub. Recommended before the first tag: a tag
    ruleset (Settings → Rules → Rulesets, target: tags) that blocks deleting and updating the tags `v*`, so that a
    published version cannot be moved by mistake (see Releasing above). Then push `main` and the tag:
 
    ```sh
    git remote add origin https://github.com/Pukka922/edelweiss-ext-docker.git
    git push -u origin main
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.2.0
+   git push origin v0.2.0
    ```
 
    When the release workflow has finished, `edelweissd ext install Pukka922/edelweiss-ext-docker` installs the

@@ -7,8 +7,10 @@ import {
   useSession,
   useToast,
 } from "@edelweiss/sdk";
+import { IconPencil, IconPlugConnected, IconTrash } from "@tabler/icons-solidjs";
 import { createEffect, createResource, createSignal, For, Match, on, Show, Switch } from "solid-js";
 import type { RegistryList as List, Registry, TestResult } from "../api";
+import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
 import { RegistryDialog } from "./RegistryDialog";
 
@@ -115,32 +117,27 @@ export function RegistryList() {
                         </td>
                         <td>
                           <div class="flex justify-end gap-1">
-                            <button
-                              type="button"
-                              class="btn btn-xs"
+                            <IconButton
+                              icon={IconPlugConnected}
+                              label={`${t("registries.test")} ${r.name}`}
+                              tooltip={t("registries.test")}
                               disabled={testing() === r.id}
-                              aria-label={`${t("registries.test")} ${r.name}`}
                               onClick={() => void test(r)}
-                            >
-                              {t("registries.test")}
-                            </button>
+                            />
                             <Show when={writable()}>
-                              <button
-                                type="button"
-                                class="btn btn-xs"
-                                aria-label={`${t("actions.edit")} ${r.name}`}
+                              <IconButton
+                                icon={IconPencil}
+                                label={`${t("actions.edit")} ${r.name}`}
+                                tooltip={t("actions.edit")}
                                 onClick={() => setEditing(r)}
-                              >
-                                {t("actions.edit")}
-                              </button>
-                              <button
-                                type="button"
-                                class="btn btn-xs btn-ghost text-error"
-                                aria-label={`${t("actions.delete")} ${r.name}`}
+                              />
+                              <IconButton
+                                icon={IconTrash}
+                                label={`${t("actions.delete")} ${r.name}`}
+                                tooltip={t("actions.delete")}
+                                danger
                                 onClick={() => setRemoving(r)}
-                              >
-                                {t("actions.delete")}
-                              </button>
+                              />
                             </Show>
                           </div>
                         </td>

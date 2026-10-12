@@ -1,15 +1,16 @@
 import { ErrorAlert, LoadingState, useApi, useExtensionNavigate, useI18n } from "@edelweiss/sdk";
+import { IconPencil, IconPlayerPlay, IconPlayerStop, IconRefresh, IconTrash } from "@tabler/icons-solidjs";
 import { createResource, createSignal, For, Match, Show, Switch } from "solid-js";
 import type { ContainerSummary } from "../api";
+import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
-import { formatDate } from "../format";
 import { onDockerChange } from "../live";
 import { isActive, portText, stateBadge, useContainerActions } from "./actions";
 import { DeleteContainerDialog } from "./DeleteContainerDialog";
 
 export function ContainerList() {
   const api = useApi();
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const navigate = useExtensionNavigate();
   const actions = useContainerActions();
   const [list, { refetch }] = createResource(() => api.get<ContainerSummary[]>("/containers"));
@@ -51,7 +52,6 @@ export function ContainerList() {
                     <th>{t("containers.image")}</th>
                     <th>{t("containers.state")}</th>
                     <th>{t("containers.ports")}</th>
-                    <th>{t("containers.created")}</th>
                     <th>
                       <span class="sr-only">{t("containers.actions")}</span>
                     </th>
@@ -82,59 +82,49 @@ export function ContainerList() {
                             {(p) => <div>{portText(p, t)}</div>}
                           </For>
                         </td>
-                        <td class="text-sm">{formatDate(c.created, locale())}</td>
                         <td>
                           <div class="flex justify-end gap-1">
                             <Show
                               when={isActive(c.state)}
                               fallback={
-                                <button
-                                  type="button"
-                                  class="btn btn-xs"
+                                <IconButton
+                                  icon={IconPlayerPlay}
+                                  label={`${t("actions.start")} ${c.name}`}
+                                  tooltip={t("actions.start")}
                                   disabled={actions.busy(c.id)}
-                                  aria-label={`${t("actions.start")} ${c.name}`}
                                   onClick={() => void act(c, "start")}
-                                >
-                                  {t("actions.start")}
-                                </button>
+                                />
                               }
                             >
-                              <button
-                                type="button"
-                                class="btn btn-xs"
+                              <IconButton
+                                icon={IconPlayerStop}
+                                label={`${t("actions.stop")} ${c.name}`}
+                                tooltip={t("actions.stop")}
                                 disabled={actions.busy(c.id)}
-                                aria-label={`${t("actions.stop")} ${c.name}`}
                                 onClick={() => void act(c, "stop")}
-                              >
-                                {t("actions.stop")}
-                              </button>
-                              <button
-                                type="button"
-                                class="btn btn-xs"
+                              />
+                              <IconButton
+                                icon={IconRefresh}
+                                label={`${t("actions.restart")} ${c.name}`}
+                                tooltip={t("actions.restart")}
                                 disabled={actions.busy(c.id)}
-                                aria-label={`${t("actions.restart")} ${c.name}`}
                                 onClick={() => void act(c, "restart")}
-                              >
-                                {t("actions.restart")}
-                              </button>
+                              />
                             </Show>
-                            <button
-                              type="button"
-                              class="btn btn-xs"
-                              aria-label={`${t("actions.edit")} ${c.name}`}
+                            <IconButton
+                              icon={IconPencil}
+                              label={`${t("actions.edit")} ${c.name}`}
+                              tooltip={t("actions.edit")}
                               onClick={() => navigate(`/containers/${c.id}/edit`)}
-                            >
-                              {t("actions.edit")}
-                            </button>
-                            <button
-                              type="button"
-                              class="btn btn-xs btn-ghost text-error"
-                              aria-label={`${t("actions.delete")} ${c.name}`}
+                            />
+                            <IconButton
+                              icon={IconTrash}
+                              label={`${t("actions.delete")} ${c.name}`}
+                              tooltip={t("actions.delete")}
+                              danger
                               disabled={actions.busy(c.id)}
                               onClick={() => setRemoving(c)}
-                            >
-                              {t("actions.delete")}
-                            </button>
+                            />
                           </div>
                         </td>
                       </tr>

@@ -7,11 +7,13 @@ import {
   useI18n,
   useToast,
 } from "@edelweiss/sdk";
+import { IconPlugConnectedX } from "@tabler/icons-solidjs";
 import { createEffect, createResource, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js";
 import type { ContainerSummary, NetworkDetail as Detail } from "../api";
 import { DetailRow } from "../components/DetailRow";
 import { Input, Select } from "../components/Field";
 import { Field } from "../components/FormDialog";
+import { IconButton } from "../components/IconButton";
 import { errorField, errorText } from "../errors";
 import { onDockerChange } from "../live";
 
@@ -178,15 +180,14 @@ export function NetworkDetail(props: { params: Record<string, string> }) {
                           <td class="font-mono text-xs">{a.ipv4 ?? ""}</td>
                           <td>
                             <div class="flex justify-end">
-                              <button
-                                type="button"
-                                class="btn btn-xs"
+                              <IconButton
+                                icon={IconPlugConnectedX}
+                                label={`${t("networks.disconnect")} ${a.name}`}
+                                tooltip={t("networks.disconnect")}
+                                danger
                                 disabled={busy()}
-                                aria-label={`${t("networks.disconnect")} ${a.name}`}
                                 onClick={() => void disconnect(n(), a)}
-                              >
-                                {t("networks.disconnect")}
-                              </button>
+                              />
                             </div>
                           </td>
                         </tr>

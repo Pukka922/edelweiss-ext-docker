@@ -29,6 +29,8 @@ type EditResult struct {
 	ID        string `json:"id"`
 	Recreated bool   `json:"recreated"`
 	Warning   string `json:"warning,omitempty"`
+	// Warnings are Docker's warnings about the new configuration (for example limits the kernel cannot enforce).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Service) edit(c fiber.Ctx) error {
@@ -44,6 +46,11 @@ func (s *Service) edit(c fiber.Ctx) error {
 	if err := spec.Validate(); err != nil {
 		return specError(err)
 	}
+	if spec.Resources.CPUs > 0 { // only a CPU limit needs the host's CPU count
+		if err := spec.ValidateHost(s.hostCPUs(c.Context())); err != nil {
+			return specError(err)
+		}
+	}
 	res, err := s.Edit(c.Context(), id, spec)
 	if err != nil {
 		return err
@@ -51,10 +58,12 @@ func (s *Service) edit(c fiber.Ctx) error {
 	return c.JSON(res)
 }
 
-// Edit applies spec to the container id: directly when only the name and the restart policy change, otherwise by
-// recreating it from its current configuration, which also happens when the image ref of the form now names another
-// image than the container runs (after a pull). A recreation that fails is rolled back. Whatever ctx does, the edit is
-// carried through (or rolled back) once it has begun: a caller that gives up must not leave a half-done recreation.
+// Edit applies spec to the container id: directly when only the name, the restart policy and the limits change and no
+// limit is removed, otherwise by recreating it from its current configuration (Docker cannot change the labels, ports,
+// mounts, ... of a container), which also happens when the image ref of the form now names another image than the
+// container runs (after a pull). A recreation that fails is rolled back.
+// Whatever ctx does, the edit is carried through (or rolled back) once it has begun: a caller that gives up must not
+// leave a half-done recreation.
 func (s *Service) Edit(ctx context.Context, id string, spec Spec) (EditResult, error) {
 	ctx = context.WithoutCancel(ctx)
 	s.editMu.Lock()
@@ -66,16 +75,17 @@ func (s *Service) Edit(ctx context.Context, id string, spec Spec) (EditResult, e
 	base := res.Container
 	img := s.image(ctx, base.Image)
 	have := SpecOf(base, img)
-	if onlyNameOrRestart(have, spec) && !s.imageMoved(ctx, base, spec.Image) {
+	if onlyDirectChanges(have, spec) && !limitRemoved(have, spec) && !s.imageMoved(ctx, base, spec.Image) {
 		return s.editDirect(ctx, base, have, spec)
 	}
 	return s.recreate(ctx, base, img, spec)
 }
 
-// onlyNameOrRestart reports whether want differs from have in nothing but the name and the restart policy. The commands
-// count as equal when they split into the same words (spacing and quoting do not matter); one that does not split is a
-// change. The order of the ports, mounts and variables does not matter.
-func onlyNameOrRestart(have, want Spec) bool {
+// onlyDirectChanges reports whether want differs from have in nothing but the name, the restart policy and the limits
+// (which an update can change). The commands count as equal when they split into the same words (spacing and quoting do
+// not matter); one that does not split is a change. The order of the ports, mounts, variables and labels does not
+// matter. The labels are not blanked below: a change of them is another change than those an update can make.
+func onlyDirectChanges(have, want Spec) bool {
 	a, b := have.Normalize().sorted(), want.Normalize().sorted()
 	wordsA, errA := shellwords.Split(a.Command)
 	wordsB, errB := shellwords.Split(b.Command)
@@ -83,12 +93,19 @@ func onlyNameOrRestart(have, want Spec) bool {
 		return false
 	}
 	for _, s := range []*Spec{&a, &b} {
-		s.Name, s.Restart, s.Start, s.Command = "", Restart{}, false, ""
+		s.Name, s.Restart, s.Start, s.Command, s.Resources = "", Restart{}, false, "", Resources{}
 		for i := range s.Mounts {
 			s.Mounts[i].Anonymous = false
 		}
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+// limitRemoved reports whether want drops a limit have sets: Docker cannot reliably take a limit back with an update,
+// so that recreates the container.
+func limitRemoved(have, want Spec) bool {
+	return (have.Resources.Memory > 0 && want.Resources.Memory == 0) ||
+		(nanoCPUs(have.Resources.CPUs) > 0 && nanoCPUs(want.Resources.CPUs) == 0)
 }
 
 // imageMoved reports whether ref now names another local image than the one base was created from: a pull moved the tag.
@@ -108,9 +125,26 @@ func withNote(err error, note string) error {
 	return err
 }
 
-// editDirect renames the container and updates its restart policy. If the update fails after the rename, the rename is
-// taken back (as far as that works), and the answer says which it was.
+// editDirect renames the container and updates its restart policy and limits in one update. The update is worked out
+// before anything changes, so a limit Docker would refuse for the swap limit changes nothing. If the update fails after
+// the rename, the rename is taken back (as far as that works), and the answer says which it was.
 func (s *Service) editDirect(ctx context.Context, base container.InspectResponse, have, want Spec) (EditResult, error) {
+	var opts client.ContainerUpdateOptions
+	if want.Restart != have.Restart {
+		policy := container.RestartPolicy{Name: container.RestartPolicyMode(want.Restart.Policy), MaximumRetryCount: want.Restart.MaxRetries}
+		opts.RestartPolicy = &policy
+	}
+	if want.Resources.Memory != have.Resources.Memory || nanoCPUs(want.Resources.CPUs) != nanoCPUs(have.Resources.CPUs) {
+		var baseMemory, baseSwap int64
+		if base.HostConfig != nil {
+			baseMemory, baseSwap = base.HostConfig.Memory, base.HostConfig.MemorySwap
+		}
+		swap, err := memorySwap(baseMemory, baseSwap, want.Resources.Memory)
+		if err != nil {
+			return EditResult{}, specError(err)
+		}
+		opts.Resources = &container.Resources{Memory: want.Resources.Memory, MemorySwap: swap, NanoCPUs: nanoCPUs(want.Resources.CPUs)}
+	}
 	renamed := false
 	if want.Name != have.Name {
 		if _, err := s.Docker.ContainerRename(ctx, base.ID, client.ContainerRenameOptions{NewName: want.Name}); err != nil {
@@ -118,9 +152,10 @@ func (s *Service) editDirect(ctx context.Context, base container.InspectResponse
 		}
 		renamed = true
 	}
-	if want.Restart != have.Restart {
-		policy := container.RestartPolicy{Name: container.RestartPolicyMode(want.Restart.Policy), MaximumRetryCount: want.Restart.MaxRetries}
-		if _, err := s.Docker.ContainerUpdate(ctx, base.ID, client.ContainerUpdateOptions{RestartPolicy: &policy}); err != nil {
+	var warnings []string
+	if opts.RestartPolicy != nil || opts.Resources != nil {
+		res, err := s.Docker.ContainerUpdate(ctx, base.ID, opts)
+		if err != nil {
 			if !renamed {
 				return EditResult{}, dockerapi.Error(err)
 			}
@@ -130,8 +165,9 @@ func (s *Service) editDirect(ctx context.Context, base container.InspectResponse
 			}
 			return EditResult{}, withNote(err, fmt.Sprintf("the rename to %s was undone", want.Name))
 		}
+		warnings = res.Warnings
 	}
-	return EditResult{ID: base.ID}, nil
+	return EditResult{ID: base.ID, Warnings: warnings}, nil
 }
 
 // recreate replaces base by a container of spec: park the old one under another name, create the new one, connect its
@@ -222,7 +258,7 @@ func (s *Service) recreate(ctx context.Context, base container.InspectResponse, 
 			return EditResult{}, undo(err)
 		}
 	}
-	out := EditResult{ID: created, Recreated: true}
+	out := EditResult{ID: created, Recreated: true, Warnings: res.Warnings}
 	if _, err := s.Docker.ContainerRemove(ctx, base.ID, client.ContainerRemoveOptions{}); err != nil {
 		out.Warning = fmt.Sprintf("the new container runs, but the old one could not be removed (%s); remove %s by hand",
 			dockerapi.Message(err), parked)

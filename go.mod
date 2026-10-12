@@ -3,7 +3,7 @@ module github.com/Pukka922/edelweiss-ext-docker
 go 1.26.0
 
 require (
-	github.com/Pukka922/edelweiss/sdk v0.1.0
+	github.com/Pukka922/edelweiss/sdk v0.2.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/fasthttp/websocket v1.5.12
 	github.com/gofiber/contrib/v3/websocket v1.2.7

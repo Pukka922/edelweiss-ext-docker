@@ -1,10 +1,12 @@
 import { ErrorAlert, LoadingState, useApi, useExtensionNavigate, useI18n } from "@edelweiss/sdk";
+import { IconPencil, IconPlayerPlay, IconPlayerStop, IconRefresh, IconTrash } from "@tabler/icons-solidjs";
 import { createResource, createSignal, For, type JSX, Match, onCleanup, Show, Switch } from "solid-js";
-import type { ContainerInfo, ContainerDetail as Detail } from "../api";
+import type { ContainerInfo, ContainerDetail as Detail, Label, Resources } from "../api";
 import { DetailRow } from "../components/DetailRow";
 import { errorText } from "../errors";
-import { formatDate } from "../format";
+import { formatBytes, formatDate } from "../format";
 import { onDockerChange } from "../live";
+import { tPlural } from "../plural";
 import { isActive, portText, stateBadge, useContainerActions } from "./actions";
 import { ConsoleTab } from "./ConsoleTab";
 import { DeleteContainerDialog } from "./DeleteContainerDialog";
@@ -30,8 +32,9 @@ function EachRun(props: { startedAt: string; children: () => JSX.Element }) {
   return <For each={[props.startedAt]}>{() => props.children()}</For>;
 }
 
-function Overview(props: { c: Detail }) {
-  const { t, locale } = useI18n();
+function Overview(props: { c: Detail; limits: Resources; labels: Label[] }) {
+  const i18n = useI18n();
+  const { t, locale } = i18n;
   const none = () => <span class="text-base-content/50">{t("detail.none")}</span>;
   return (
     <dl class="divide-y divide-base-200">
@@ -49,6 +52,22 @@ function Overview(props: { c: Detail }) {
         <DetailRow label={t("detail.health")}>{props.c.state.health}</DetailRow>
       </Show>
       <DetailRow label={t("detail.restart")}>{t(`form.policies.${props.c.restart.policy}`)}</DetailRow>
+      <DetailRow label={t("detail.limits")}>
+        <Show when={props.limits.memory > 0 || props.limits.cpus > 0} fallback={none()}>
+          {[
+            props.limits.memory > 0
+              ? t("detail.limitMemory", { size: formatBytes(props.limits.memory, locale()) })
+              : "",
+            props.limits.cpus > 0
+              ? tPlural(i18n, "detail.limitCpus", props.limits.cpus, {
+                  count: props.limits.cpus.toLocaleString(locale()),
+                })
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </Show>
+      </DetailRow>
       <DetailRow label={t("detail.ports")}>
         <Show when={props.c.ports.length > 0} fallback={none()}>
           <For each={props.c.ports}>{(p) => <div>{portText(p, t)}</div>}</For>
@@ -73,6 +92,13 @@ function Overview(props: { c: Detail }) {
       <DetailRow label={t("detail.env")}>
         <Show when={props.c.env.length > 0} fallback={none()}>
           <For each={props.c.env}>{(e) => <div class="break-all font-mono text-xs">{e}</div>}</For>
+        </Show>
+      </DetailRow>
+      <DetailRow label={t("detail.labels")}>
+        <Show when={props.labels.length > 0} fallback={none()}>
+          <For each={props.labels}>
+            {(l) => <div class="break-all font-mono text-xs">{`${l.key}=${l.value}`}</div>}
+          </For>
         </Show>
       </DetailRow>
     </dl>
@@ -142,6 +168,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
                         disabled={actions.busy(i().container.id)}
                         onClick={() => void act("start")}
                       >
+                        <IconPlayerPlay size={16} strokeWidth={1.75} aria-hidden="true" />
                         {t("actions.start")}
                       </button>
                     }
@@ -152,6 +179,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
                       disabled={actions.busy(i().container.id)}
                       onClick={() => void act("stop")}
                     >
+                      <IconPlayerStop size={16} strokeWidth={1.75} aria-hidden="true" />
                       {t("actions.stop")}
                     </button>
                     <button
@@ -160,6 +188,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
                       disabled={actions.busy(i().container.id)}
                       onClick={() => void act("restart")}
                     >
+                      <IconRefresh size={16} strokeWidth={1.75} aria-hidden="true" />
                       {t("actions.restart")}
                     </button>
                   </Show>
@@ -168,6 +197,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
                     class="btn btn-sm"
                     onClick={() => navigate(`/containers/${i().container.id}/edit`)}
                   >
+                    <IconPencil size={16} strokeWidth={1.75} aria-hidden="true" />
                     {t("actions.edit")}
                   </button>
                   <button
@@ -176,6 +206,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
                     disabled={actions.busy(i().container.id)}
                     onClick={() => setRemoving({ id: i().container.id, name: i().container.name })}
                   >
+                    <IconTrash size={16} strokeWidth={1.75} aria-hidden="true" />
                     {t("actions.delete")}
                   </button>
                 </div>
@@ -198,7 +229,7 @@ export function ContainerDetail(props: { params: Record<string, string> }) {
               </div>
               <Switch>
                 <Match when={tab() === "overview"}>
-                  <Overview c={i().container} />
+                  <Overview c={i().container} limits={i().spec.resources} labels={i().spec.labels} />
                 </Match>
                 <Match when={tab() === "logs"}>
                   <EachRun startedAt={i().container.state.startedAt}>

@@ -76,6 +76,154 @@ func TestEditAgainstDaemon(t *testing.T) {
 	}
 }
 
+// Limits are changed on the running container without recreating it; removing one recreates (Docker cannot take a limit
+// back with an update).
+func TestEditLimitsAgainstDaemon(t *testing.T) {
+	cli := dockertest.Live(t)
+	ctx := context.Background()
+	svc := New(cli)
+	svc.StopTimeout = 1
+	app := testAppOf(svc)
+	// the restart policy must survive every limits-only update: it is not part of what is sent, and the daemon must not
+	// reset it
+	id := dockertest.Run(t, cli, client.ContainerCreateOptions{Name: dockertest.Name(t, "editlimits"),
+		Config:     &container.Config{Image: dockertest.Busybox, Cmd: []string{"sleep", "300"}},
+		HostConfig: &container.HostConfig{RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped}}})
+	put := func(spec Spec) EditResult {
+		t.Helper()
+		resp := sdktest.Do(t, app, sdktest.Request("PUT", "/containers/"+id, strings.NewReader(toJSON(t, spec)), anna))
+		res := sdktest.DecodeJSON[EditResult](t, resp)
+		if resp.StatusCode != 200 {
+			t.Fatalf("edit: %d %+v", resp.StatusCode, res)
+		}
+		return res
+	}
+	// limits checks both limits and the restart policy of the container
+	limits := func(step string, memory, nanoCPUs int64) {
+		t.Helper()
+		got, err := cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		hc := got.Container.HostConfig
+		if hc.Memory != memory || hc.NanoCPUs != nanoCPUs || hc.RestartPolicy.Name != container.RestartPolicyUnlessStopped {
+			t.Fatalf("%s: memory %d, nano CPUs %d, restart policy %q; want %d, %d, unless-stopped",
+				step, hc.Memory, hc.NanoCPUs, hc.RestartPolicy.Name, memory, nanoCPUs)
+		}
+	}
+	spec := sdktest.DecodeJSON[Info](t, sdktest.Do(t, app, sdktest.Request("GET", "/containers/"+id, nil, anna))).Spec
+	if spec.Restart.Policy != "unless-stopped" {
+		t.Fatalf("the form shows restart policy %+v, want unless-stopped", spec.Restart)
+	}
+
+	// none -> 64 MiB and half a CPU, directly
+	spec.Resources = Resources{Memory: 64 << 20, CPUs: 0.5}
+	if res := put(spec); res.Recreated || res.ID != id {
+		t.Fatalf("first limits recreated: %+v", res)
+	}
+	limits("after the first limits", 64<<20, 500_000_000)
+	// raising the memory limit past the old swap limit, directly; the CPU limit stays
+	spec.Resources.Memory = 256 << 20
+	if res := put(spec); res.Recreated || res.ID != id {
+		t.Fatalf("raising recreated: %+v", res)
+	}
+	limits("after raising the memory", 256<<20, 500_000_000)
+	// removing the CPU limit recreates; the memory limit and the restart policy are carried over
+	spec.Resources.CPUs = 0
+	res := put(spec)
+	if !res.Recreated || res.ID == id {
+		t.Fatalf("removing did not recreate: %+v", res)
+	}
+	dockertest.RemoveContainerAtEnd(t, cli, res.ID)
+	id = res.ID
+	limits("after removing the CPU limit", 256<<20, 0)
+}
+
+// Docker cannot change the labels of a container, so changing them recreates it. Docker's own labels (here the compose
+// project) are not in the form and stay; the same labels in another order are no change.
+func TestEditLabelsAgainstDaemon(t *testing.T) {
+	cli := dockertest.Live(t)
+	ctx := context.Background()
+	svc := New(cli)
+	svc.StopTimeout = 1
+	app := testAppOf(svc)
+	const project = "com.docker.compose.project"
+	id := dockertest.Run(t, cli, client.ContainerCreateOptions{Name: dockertest.Name(t, "editlabels"),
+		Config: &container.Config{Image: dockertest.Busybox, Cmd: []string{"sleep", "300"},
+			Labels: map[string]string{project: "e2e", "app": "web", "tier": "old"}}})
+
+	spec := func() Spec {
+		t.Helper()
+		return sdktest.DecodeJSON[Info](t, sdktest.Do(t, app, sdktest.Request("GET", "/containers/"+id, nil, anna))).Spec
+	}
+	put := func(s Spec) EditResult {
+		t.Helper()
+		resp := sdktest.Do(t, app, sdktest.Request("PUT", "/containers/"+id, strings.NewReader(toJSON(t, s)), anna))
+		res := sdktest.DecodeJSON[EditResult](t, resp)
+		if resp.StatusCode != 200 || res.Warning != "" {
+			t.Fatalf("edit: %d %+v", resp.StatusCode, res)
+		}
+		return res
+	}
+	// labels checks that Docker reports the labels of want for the container, and none of those named in gone
+	labels := func(step string, want map[string]string, gone ...string) {
+		t.Helper()
+		got, err := cli.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range want {
+			if have, ok := got.Container.Config.Labels[k]; !ok || have != v {
+				t.Fatalf("%s: label %s=%q, want %q (all: %q)", step, k, have, v, got.Container.Config.Labels)
+			}
+		}
+		for _, k := range gone {
+			if v, ok := got.Container.Config.Labels[k]; ok {
+				t.Fatalf("%s: label %s=%q is still there (all: %q)", step, k, v, got.Container.Config.Labels)
+			}
+		}
+	}
+
+	form := spec()
+	if want := []Label{{Key: "app", Value: "web"}, {Key: "tier", Value: "old"}}; !slices.Equal(form.Labels, want) {
+		t.Fatalf("the form shows %+v, want %+v (Docker's own label is not part of it)", form.Labels, want)
+	}
+
+	// one label removed, one added (in another order): recreated, with Docker's label from the old container
+	old := id
+	form.Labels = []Label{{Key: "stage", Value: "prod"}, {Key: "app", Value: "web"}}
+	res := put(form)
+	if !res.Recreated || res.ID == old {
+		t.Fatalf("a label change did not recreate: %+v", res)
+	}
+	id = res.ID
+	dockertest.RemoveContainerAtEnd(t, cli, id)
+	labels("after the recreation", map[string]string{project: "e2e", "app": "web", "stage": "prod"}, "tier")
+	form = spec()
+	if want := []Label{{Key: "app", Value: "web"}, {Key: "stage", Value: "prod"}}; !slices.Equal(form.Labels, want) {
+		t.Fatalf("the form of the new container shows %+v, want %+v", form.Labels, want)
+	}
+
+	// the same labels in another order: nothing to do
+	slices.Reverse(form.Labels)
+	if again := put(form); again.Recreated || again.ID != id {
+		t.Fatalf("the same labels in another order changed something: %+v", again)
+	}
+
+	// no label of its own any more: recreated again, Docker's label stays
+	form.Labels = nil
+	res = put(form)
+	if !res.Recreated || res.ID == id {
+		t.Fatalf("removing the labels did not recreate: %+v", res)
+	}
+	id = res.ID
+	dockertest.RemoveContainerAtEnd(t, cli, id)
+	labels("after removing the own labels", map[string]string{project: "e2e"}, "app", "stage", "tier")
+	if form := spec(); len(form.Labels) != 0 {
+		t.Fatalf("the form shows %+v, want no labels", form.Labels)
+	}
+}
+
 // A new network in the form replaces the old one: the recreated container is connected to the form's network only.
 func TestEditChangesTheNetworkAgainstDaemon(t *testing.T) {
 	cli := dockertest.Live(t)

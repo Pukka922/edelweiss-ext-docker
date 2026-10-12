@@ -7,8 +7,10 @@ import {
   useI18n,
   useToast,
 } from "@edelweiss/sdk";
+import { IconTrash } from "@tabler/icons-solidjs";
 import { createResource, createSignal, For, Match, Show, Switch } from "solid-js";
 import { type ImageInfo, shortId } from "../api";
+import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
 import { formatBytes, formatDate } from "../format";
 import { onDockerChange } from "../live";
@@ -146,16 +148,14 @@ export function ImageList() {
                         </td>
                         <td>
                           <div class="flex justify-end">
-                            <button
-                              type="button"
-                              class="btn btn-xs btn-ghost text-error"
-                              aria-label={`${t("actions.delete")} ${nameOf(i)}`}
+                            <IconButton
+                              icon={IconTrash}
+                              label={`${t("actions.delete")} ${nameOf(i)}`}
+                              tooltip={i.usedBy.length > 0 ? t("errors.image_in_use") : t("actions.delete")}
+                              danger
                               disabled={i.usedBy.length > 0}
-                              title={i.usedBy.length > 0 ? t("errors.image_in_use") : undefined}
                               onClick={() => setRemoving(i)}
-                            >
-                              {t("actions.delete")}
-                            </button>
+                            />
                           </div>
                         </td>
                       </tr>

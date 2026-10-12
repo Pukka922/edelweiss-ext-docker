@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 
 	"github.com/Pukka922/edelweiss-ext-docker/internal/dockerapi"
@@ -360,5 +361,81 @@ func TestCreateRefusesUnsafeImages(t *testing.T) {
 	}
 	if len(inspected) != 0 {
 		t.Fatalf("ImageInspect must not be called for these images, was called with %q", inspected)
+	}
+}
+
+func TestCreateRefusesMoreCPUsThanTheHostHas(t *testing.T) {
+	f := &dockertest.Fake{
+		InfoFn: func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			return client.SystemInfoResult{Info: system.Info{NCPU: 2}}, nil
+		},
+		ImageInspectFn: func(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			t.Fatal("the image must not be looked at for a refused form")
+			return client.ImageInspectResult{}, nil
+		},
+	}
+	body := `{"name":"web","image":"nginx:1.29","resources":{"memory":0,"cpus":3}}`
+	resp := sdktestDo(t, testApp(f), "POST", "/containers", body)
+	if got := readAll(t, resp); resp.StatusCode != 400 || !strings.Contains(got, `"invalid_container_spec"`) || !strings.Contains(got, `"field":"resources.cpus"`) {
+		t.Fatalf("%d %s", resp.StatusCode, got)
+	}
+}
+
+// Only a CPU limit needs the number of CPUs of the host: without one, docker info is not asked for.
+func TestCreateWithoutACPULimitDoesNotAskForTheHostInfo(t *testing.T) {
+	f := &dockertest.Fake{
+		InfoFn: func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			t.Error("docker info was asked for, though the form has no CPU limit")
+			return client.SystemInfoResult{}, nil
+		},
+		ImageInspectFn: func(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, nil
+		},
+		ContainerCreateFn: func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			return client.ContainerCreateResult{ID: "new-id"}, nil
+		},
+	}
+	app := testApp(f)
+	for name, body := range map[string]string{
+		"resources omitted": `{"name":"web","image":"nginx:1.29","start":false}`,
+		"limits set to 0":   `{"name":"web","image":"nginx:1.29","start":false,"resources":{"memory":0,"cpus":0}}`,
+		"a memory limit":    `{"name":"web","image":"nginx:1.29","start":false,"resources":{"memory":268435456,"cpus":0}}`,
+		"CPUs left out":     `{"name":"web","image":"nginx:1.29","start":false,"resources":{"memory":268435456}}`,
+	} {
+		if resp := sdktestDo(t, app, "POST", "/containers", body); resp.StatusCode != 201 {
+			t.Errorf("%s: %d %s", name, resp.StatusCode, readAll(t, resp))
+		}
+	}
+}
+
+func TestCreateWithACPULimitChecksItAgainstTheHost(t *testing.T) {
+	infos := 0
+	f := &dockertest.Fake{
+		InfoFn: func(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+			infos++
+			return client.SystemInfoResult{Info: system.Info{NCPU: 2}}, nil
+		},
+		ImageInspectFn: func(context.Context, string, ...client.ImageInspectOption) (client.ImageInspectResult, error) {
+			return client.ImageInspectResult{}, nil
+		},
+		ContainerCreateFn: func(context.Context, client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			return client.ContainerCreateResult{ID: "new-id"}, nil
+		},
+	}
+	app := testApp(f)
+	for _, tc := range []struct {
+		cpus   string
+		status int
+	}{{"0.01", 201}, {"2", 201}, {"2.01", 400}, {"3", 400}} {
+		infos = 0
+		body := `{"name":"web","image":"nginx:1.29","start":false,"resources":{"cpus":` + tc.cpus + `}}`
+		resp := sdktestDo(t, app, "POST", "/containers", body)
+		raw := readAll(t, resp)
+		if resp.StatusCode != tc.status || infos != 1 {
+			t.Errorf("cpus %s: %d (want %d), docker info asked for %d times (want 1): %s", tc.cpus, resp.StatusCode, tc.status, infos, raw)
+		}
+		if tc.status == 400 && !strings.Contains(raw, `"field":"resources.cpus"`) {
+			t.Errorf("cpus %s: %s", tc.cpus, raw)
+		}
 	}
 }

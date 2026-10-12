@@ -20,15 +20,20 @@ import (
 )
 
 // CreateOptions builds the options to create the container of s, which must be normalized and validated (Spec.Normalize,
-// Spec.Validate): CreateOptions still answers a *FieldError, not a panic, for a port or host IP it cannot use, but its
-// messages are those of a last line of defense. With base (editing) it starts from base's configuration, so everything
-// the form does not manage stays: resources, devices, capabilities, healthcheck, log driver, mounts of other types
-// (tmpfs, ...), and the options of mounts and of ports:
+// Spec.Validate): CreateOptions still answers a *FieldError, not a panic, for a port or host IP it cannot use and for a
+// label key in Docker's namespaces, but its messages are those of a last line of defense. With base (editing) it starts
+// from base's configuration, so everything the form does not manage stays: resources other than the memory and CPU
+// limit (see memorySwap for swap), devices, capabilities, healthcheck, log driver, mounts of other types (tmpfs, ...),
+// Docker's own labels (com.docker.*, io.docker.*, org.dockerproject.*, such as those of Docker Compose), and the options
+// of mounts and of ports:
 //   - a volume or bind mount of the form that is still there with the same type, source and target keeps the options of
 //     base's mount (HostConfig.Mounts), or, if base made it with -v, its entry in HostConfig.Binds as it was (propagation,
 //     SELinux z/Z, nocopy, ...), with only the ro/rw flag following the form;
 //   - a host port range (8080-8090), which the form shows as host port 0, is kept for the same container port, protocol
 //     and host IP while the form leaves the host port 0.
+//
+// The form manages the labels of the container itself (Spec.Labels, see SpecOf): they replace base's, so a label the form
+// no longer has is gone, unless the image sets it, in which case Docker merges it in again.
 //
 // Values Docker took from base's image img (CMD, ENTRYPOINT, ENV, labels, working directory, user, stop signal,
 // healthcheck, exposed ports) are not frozen, and neither is the hostname Docker derived from base's ID. The returned map
@@ -57,6 +62,24 @@ func CreateOptions(s Spec, base *container.InspectResponse, img *image.InspectRe
 	cfg.Env = nil
 	for _, e := range s.Env {
 		cfg.Env = append(cfg.Env, e.Name+"="+e.Value)
+	}
+	// Docker's own labels of base stay (unfreeze has left out those of the image, which Docker merges in again), the rest
+	// are the form's. A new map: the one in cfg may be base's.
+	labels := map[string]string{}
+	for k, v := range cfg.Labels {
+		if reservedLabel(k) {
+			labels[k] = v
+		}
+	}
+	for i, l := range s.Labels {
+		if reservedLabel(l.Key) { // Validate refuses it; the form must never override or forge a label of Docker's
+			return client.ContainerCreateOptions{}, nil, fieldErr("labels."+strconv.Itoa(i)+".key", "is reserved for Docker")
+		}
+		labels[l.Key] = l.Value
+	}
+	cfg.Labels = nil
+	if len(labels) > 0 {
+		cfg.Labels = labels
 	}
 	cfg.Volumes = nil // anonymous volumes are taken over as mounts by name
 
@@ -92,6 +115,14 @@ func CreateOptions(s Spec, base *container.InspectResponse, img *image.InspectRe
 	host.NetworkMode = container.NetworkMode(s.Network)
 	host.RestartPolicy = container.RestartPolicy{Name: container.RestartPolicyMode(s.Restart.Policy), MaximumRetryCount: s.Restart.MaxRetries}
 	host.Privileged = s.Privileged
+	host.Memory, host.NanoCPUs, host.MemorySwap = s.Resources.Memory, nanoCPUs(s.Resources.CPUs), 0
+	if base != nil && base.HostConfig != nil {
+		swap, err := memorySwap(base.HostConfig.Memory, base.HostConfig.MemorySwap, s.Resources.Memory)
+		if err != nil {
+			return client.ContainerCreateOptions{}, nil, err
+		}
+		host.MemorySwap = swap
+	}
 	var baseBinds []string
 	var baseMounts []mount.Mount
 	if base != nil && base.HostConfig != nil {

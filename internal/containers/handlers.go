@@ -289,6 +289,15 @@ func (s *Service) requireImage(ctx context.Context, ref string) error {
 	}
 }
 
+// hostCPUs is the number of CPUs of the Docker host, 0 if Docker does not say.
+func (s *Service) hostCPUs(ctx context.Context) int {
+	res, err := s.Docker.Info(ctx, client.InfoOptions{})
+	if err != nil {
+		return 0
+	}
+	return res.Info.NCPU
+}
+
 func (s *Service) create(c fiber.Ctx) error {
 	spec := Spec{Start: true} // an omitted "start" means true
 	if err := httpx.Body(c, &spec); err != nil {
@@ -297,6 +306,11 @@ func (s *Service) create(c fiber.Ctx) error {
 	spec = spec.Normalize()
 	if err := spec.Validate(); err != nil {
 		return specError(err)
+	}
+	if spec.Resources.CPUs > 0 { // only a CPU limit needs the host's CPU count
+		if err := spec.ValidateHost(s.hostCPUs(c.Context())); err != nil {
+			return specError(err)
+		}
 	}
 	ctx := c.Context()
 	if err := s.requireImage(ctx, spec.Image); err != nil {

@@ -70,6 +70,11 @@ describe("ImageList", () => {
     expect((view.getByRole("button", { name: "Delete nginx:1.29" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
+    // the tooltip of a disabled button says why, the one of an enabled button names the action
+    const tip = (name: string) =>
+      view.getByRole("button", { name }).closest("[data-tip]")?.getAttribute("data-tip");
+    expect(tip("Delete nginx:1.29")).toBe("The image is used by containers.");
+    expect(tip("Delete busybox:1.37")).toBe("Delete");
     fireEvent.click(view.getByRole("button", { name: "Delete busybox:1.37" }));
     const dialog = await view.findByRole("dialog", { name: "Delete image" });
     expect(view.getByText("Delete busybox:1.37 with all its tags?")).toBeTruthy();

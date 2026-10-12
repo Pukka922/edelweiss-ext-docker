@@ -2,6 +2,7 @@ package containers
 
 import (
 	"errors"
+	"maps"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -417,5 +418,206 @@ func TestCreateOptionsCarriesHostPortRangesOver(t *testing.T) {
 	s.Ports = []Port{{ContainerPort: 80, Protocol: "tcp"}}
 	if opts, _, err := CreateOptions(s, nil, nil); err != nil || opts.HostConfig.PortBindings[p80][0].HostPort != "" {
 		t.Errorf("new container: %v %v", opts.HostConfig.PortBindings, err)
+	}
+}
+
+func TestCreateOptionsSetsTheLimits(t *testing.T) {
+	s := validSpec()
+	s.Resources = Resources{Memory: 512 << 20, CPUs: 0.5}
+	opts, _, err := CreateOptions(s, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := opts.HostConfig
+	if h.Memory != 512<<20 || h.NanoCPUs != 500_000_000 || h.MemorySwap != 0 { // a new container: Docker's default swap
+		t.Fatalf("host %d %d %d", h.Memory, h.NanoCPUs, h.MemorySwap)
+	}
+}
+
+func TestCreateOptionsSetsTheLabelsOfTheForm(t *testing.T) {
+	s := validSpec()
+	s.Labels = []Label{{Key: "app", Value: "web"}, {Key: "flag", Value: ""}, {Key: "Tier", Value: " back "}}
+	opts, _, err := CreateOptions(s.Normalize(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"app": "web", "flag": "", "Tier": " back "}; !maps.Equal(opts.Config.Labels, want) {
+		t.Fatalf("labels %q, want %q (empty values and the case of the keys stay)", opts.Config.Labels, want)
+	}
+	// no label in the form, none in the options
+	if opts, _, err := CreateOptions(validSpec(), nil, nil); err != nil || len(opts.Config.Labels) != 0 {
+		t.Fatalf("labels %q %v", opts.Config.Labels, err)
+	}
+}
+
+// composed is inspected() as a container of a Docker Compose project: besides the label of its own (app=web) and
+// that of its image (maintainer=NGINX) it carries labels in the namespaces Docker keeps for itself.
+func composed() (container.InspectResponse, *image.InspectResponse) {
+	c, img := inspected()
+	c.Config.Labels["com.docker.compose.project"] = "shop"
+	c.Config.Labels["com.docker.compose.service"] = "web"
+	return c, img
+}
+
+// Docker's own labels (com.docker.compose.project, ...) are not in the form and stay when the container is recreated;
+// the form's labels replace the container's own, a removed one is gone, and the labels of the image are not frozen (Docker
+// takes them from the image again).
+func TestCreateOptionsOfARecreationKeepsDockersLabelsAndTakesTheOwnFromTheForm(t *testing.T) {
+	dockers := map[string]string{"com.docker.compose.project": "shop", "com.docker.compose.service": "web"}
+	cases := []struct {
+		name   string
+		mutate func(*Spec)
+		want   map[string]string // besides Docker's
+	}{
+		{"unchanged form", func(*Spec) {}, map[string]string{"app": "web"}},
+		{"a label added", func(s *Spec) { s.Labels = append(s.Labels, Label{Key: "tier", Value: "front"}) },
+			map[string]string{"app": "web", "tier": "front"}},
+		{"a value changed", func(s *Spec) { s.Labels[0].Value = "api" }, map[string]string{"app": "api"}},
+		{"a key renamed", func(s *Spec) { s.Labels[0].Key = "service" }, map[string]string{"service": "web"}},
+		{"the own label removed: it is gone, not frozen", func(s *Spec) { s.Labels = []Label{} }, nil},
+		{"removed and added", func(s *Spec) { s.Labels = []Label{{Key: "stage", Value: "prod"}} }, map[string]string{"stage": "prod"}},
+		{"an empty value", func(s *Spec) { s.Labels[0].Value = "" }, map[string]string{"app": ""}},
+		{"the label of the image set by the form again", func(s *Spec) { s.Labels = append(s.Labels, Label{Key: "maintainer", Value: "ACME"}) },
+			map[string]string{"app": "web", "maintainer": "ACME"}},
+	}
+	for _, tc := range cases {
+		c, img := composed()
+		before := maps.Clone(c.Config.Labels)
+		s := SpecOf(c, img)
+		tc.mutate(&s)
+		opts, _, err := CreateOptions(s.Normalize(), &c, img)
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		want := maps.Clone(dockers)
+		maps.Copy(want, tc.want)
+		if !maps.Equal(opts.Config.Labels, want) {
+			t.Errorf("%s: labels %q, want %q", tc.name, opts.Config.Labels, want)
+		}
+		if !maps.Equal(c.Config.Labels, before) {
+			t.Errorf("%s: the labels of base changed: %q", tc.name, c.Config.Labels)
+		}
+	}
+}
+
+// A label in Docker's namespaces that base carries with the key and value of its image's label came from the image (as
+// ENV does): Docker merges it in again, so a recreation does not write it. One with another value than the image's is the
+// container's and stays, like the compose labels.
+func TestCreateOptionsOfARecreationDropsDockersLabelsOfTheImageAndKeepsTheOthers(t *testing.T) {
+	c, img := composed() // base: app=web, maintainer=NGINX, com.docker.compose.project=shop, com.docker.compose.service=web
+	img.Config.Labels["com.docker.image.build"] = "1"
+	img.Config.Labels["io.docker.image.kind"] = "base"
+	img.Config.Labels["com.docker.compose.service"] = "from-the-image" // base has web: its own value
+	c.Config.Labels["com.docker.image.build"] = "1"                    // copied from the image: same key and value
+	c.Config.Labels["io.docker.image.kind"] = "base"
+	before := maps.Clone(c.Config.Labels)
+
+	opts, _, err := CreateOptions(SpecOf(c, img), &c, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"app": "web", "com.docker.compose.project": "shop", "com.docker.compose.service": "web"}
+	if !maps.Equal(opts.Config.Labels, want) {
+		t.Fatalf("labels %q, want %q (the image's own labels are not frozen, the container's own stay)", opts.Config.Labels, want)
+	}
+	if !maps.Equal(c.Config.Labels, before) {
+		t.Fatalf("the labels of base changed: %q", c.Config.Labels)
+	}
+
+	// without the image nothing is known to come from it: everything of Docker's stays
+	opts, _, err = CreateOptions(SpecOf(c, nil), &c, nil)
+	if err != nil || !maps.Equal(opts.Config.Labels, before) {
+		t.Fatalf("without the image: labels %q %v, want %q", opts.Config.Labels, err, before)
+	}
+}
+
+// CreateOptions refuses a label key in Docker's namespaces by itself, as its last line of defense when Validate was
+// skipped: the form never sets or overrides a label of Docker's, for a new container or a recreation.
+func TestCreateOptionsRefusesALabelInDockersNamespaces(t *testing.T) {
+	for _, key := range []string{"com.docker.compose.project", "io.docker.x", "org.dockerproject.y"} {
+		for _, recreation := range []bool{false, true} {
+			c, img := composed()
+			s := validSpec()
+			s.Labels = []Label{{Key: "app", Value: "web"}, {Key: key, Value: "forged"}}
+			base := &c
+			if !recreation {
+				base, img = nil, nil
+			}
+			var fe *FieldError
+			_, _, err := CreateOptions(s, base, img)
+			if !errors.As(err, &fe) || fe.Field != "labels.1.key" || !strings.Contains(fe.Message, "is reserved for Docker") {
+				t.Errorf("%s (recreation %v): CreateOptions() = %v, want a FieldError for labels.1.key", key, recreation, err)
+			}
+		}
+	}
+}
+
+// A container label that overrides one of its image with another value is the container's own: the form shows it, and a
+// recreation writes the form's value; removing it lets the label of the image show again (Docker merges it in).
+func TestCreateOptionsOfARecreationWithALabelOverridingTheImage(t *testing.T) {
+	c, img := inspected()
+	c.Config.Labels = map[string]string{"maintainer": "ACME"} // the image says NGINX
+	s := SpecOf(c, img)
+	if !slices.Equal(s.Labels, []Label{{Key: "maintainer", Value: "ACME"}}) {
+		t.Fatalf("form labels %+v", s.Labels)
+	}
+	opts, _, err := CreateOptions(s, &c, img)
+	if err != nil || !maps.Equal(opts.Config.Labels, map[string]string{"maintainer": "ACME"}) {
+		t.Fatalf("labels %q %v", opts.Config.Labels, err)
+	}
+	s.Labels = []Label{}
+	if opts, _, err = CreateOptions(s, &c, img); err != nil || len(opts.Config.Labels) != 0 {
+		t.Fatalf("after removing it: labels %q %v, want none (the image's label comes back by itself)", opts.Config.Labels, err)
+	}
+}
+
+// Without the image (it is gone) nothing is known to come from it: the form shows every label but Docker's, and a
+// recreation writes exactly those and keeps Docker's.
+func TestCreateOptionsOfARecreationWithoutTheImageKeepsTheLabels(t *testing.T) {
+	c, _ := composed()
+	s := SpecOf(c, nil)
+	if !slices.Equal(s.Labels, []Label{{Key: "app", Value: "web"}, {Key: "maintainer", Value: "NGINX"}}) {
+		t.Fatalf("form labels %+v", s.Labels)
+	}
+	opts, _, err := CreateOptions(s, &c, nil)
+	want := maps.Clone(c.Config.Labels)
+	if err != nil || !maps.Equal(opts.Config.Labels, want) {
+		t.Fatalf("labels %q %v, want %q", opts.Config.Labels, err, want)
+	}
+	s.Labels = s.Labels[:1] // maintainer removed
+	delete(want, "maintainer")
+	if opts, _, err = CreateOptions(s, &c, nil); err != nil || !maps.Equal(opts.Config.Labels, want) {
+		t.Fatalf("labels %q %v, want %q", opts.Config.Labels, err, want)
+	}
+}
+
+func TestCreateOptionsOfARecreationTakesTheLimitsOfTheForm(t *testing.T) {
+	base, img := inspected()               // Memory 256 MiB
+	base.HostConfig.MemorySwap = 512 << 20 // Docker's default: twice the memory
+	base.HostConfig.NanoCPUs = 2_000_000_000
+	s := SpecOf(base, img)
+	s.Resources = Resources{Memory: 1 << 30, CPUs: 0} // more memory, the CPU limit removed
+	opts, _, err := CreateOptions(s, &base, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := opts.HostConfig
+	if h.Memory != 1<<30 || h.MemorySwap != 2<<30 || h.NanoCPUs != 0 {
+		t.Fatalf("host %d %d %d", h.Memory, h.MemorySwap, h.NanoCPUs)
+	}
+	if base.HostConfig.Memory != 256<<20 || base.HostConfig.NanoCPUs != 2_000_000_000 {
+		t.Fatalf("base changed: %+v", base.HostConfig.Resources)
+	}
+}
+
+func TestCreateOptionsRefusesALimitAboveACustomSwap(t *testing.T) {
+	base, img := inspected()
+	base.HostConfig.MemorySwap = 300 << 20 // set outside edelweiss
+	s := SpecOf(base, img)
+	s.Resources.Memory = 1 << 30
+	var fe *FieldError
+	if _, _, err := CreateOptions(s, &base, img); !errors.As(err, &fe) || fe.Field != "resources.memory" {
+		t.Fatalf("err %v", err)
 	}
 }

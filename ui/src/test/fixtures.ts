@@ -33,8 +33,22 @@ export const info: ContainerInfo = {
     ports: [],
     mounts: [],
     env: [],
+    labels: [],
     network: "bridge",
     restart: { policy: "unless-stopped", maxRetries: 0 },
     privileged: false,
+    resources: { memory: 0, cpus: 0 },
+  },
+};
+
+/** The container "web" with two labels of its own (the fixture above has none): the Labels row of the overview shows them. */
+export const labelled: ContainerInfo = {
+  ...info,
+  spec: {
+    ...info.spec,
+    labels: [
+      { key: "app", value: "web" },
+      { key: "com.example.empty", value: "" },
+    ],
   },
 };

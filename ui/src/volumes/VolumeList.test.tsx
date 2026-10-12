@@ -40,6 +40,11 @@ describe("VolumeList", () => {
     expect(view.getByText("anonymous")).toBeTruthy();
     expect(view.getByText("unused")).toBeTruthy();
     expect((view.getByRole("button", { name: "Delete web-data" }) as HTMLButtonElement).disabled).toBe(true);
+    // the tooltip of a disabled button says why, the one of an enabled button names the action
+    const tip = (name: string) =>
+      view.getByRole("button", { name }).closest("[data-tip]")?.getAttribute("data-tip");
+    expect(tip("Delete web-data")).toBe("The volume is used by containers.");
+    expect(tip("Delete ffffffffffff")).toBe("Delete");
     fireEvent.click(view.getByRole("button", { name: "web" }));
     await settle(); // the router navigates in a transition
     expect(view.history.get()).toBe("/x/docker/containers/c1");

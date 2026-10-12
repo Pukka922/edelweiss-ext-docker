@@ -11,7 +11,7 @@ import (
 func TestManifest(t *testing.T) {
 	ext := sdk.New(sdk.Options{Manifest: manifest})
 	m := ext.Manifest
-	if m.ID != "docker" || m.RequiresAdmin || m.Menu.Section != "containers" {
+	if m.ID != "docker" || m.RequiresAdmin || m.Menu.Section != "virtualization" {
 		t.Fatalf("manifest %+v", m)
 	}
 	if !slices.Equal(m.RequiredAPK(), []string{"docker"}) {

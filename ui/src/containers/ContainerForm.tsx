@@ -1,5 +1,15 @@
 import { ErrorAlert, LoadingState, useApi, useExtensionNavigate, useI18n, useToast } from "@edelweiss/sdk";
-import { createResource, createSignal, For, Index, type JSX, Match, Show, Switch } from "solid-js";
+import {
+  createResource,
+  createSignal,
+  createUniqueId,
+  For,
+  Index,
+  type JSX,
+  Match,
+  Show,
+  Switch,
+} from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import type {
   ContainerInfo,
@@ -9,14 +19,22 @@ import type {
   NetworkInfo,
   Policy,
   PullStart,
+  Resources,
   Spec,
+  Status,
   Volume,
 } from "../api";
 import { Input, Select } from "../components/Field";
 import { errorField, errorText } from "../errors";
+import { formatBytes } from "../format";
+import { tPlural } from "../plural";
 import { PullProgress } from "./PullProgress";
+import { VolumeSelect } from "./VolumeSelect";
 
 const policies: Policy[] = ["no", "always", "unless-stopped", "on-failure"];
+
+const MiB = 2 ** 20;
+const GiB = 2 ** 30;
 
 function emptySpec(): Spec {
   return {
@@ -26,15 +44,21 @@ function emptySpec(): Spec {
     ports: [],
     mounts: [],
     env: [],
+    labels: [],
     network: "bridge",
     privileged: false,
+    resources: { memory: 0, cpus: 0 },
     restart: { policy: "no", maxRetries: 0 },
   };
 }
 
+/** The CPU limit in whole nanoCPUs, as the backend compares it: 0.1 + 0.2 and 0.3 are the same limit. */
+const nanoCPUs = (r: Resources) => Math.round(r.cpus * 1e9);
+
 /**
- * Whether saving current instead of initial recreates the container (the backend's rule: anything but name and
- * restart policy, and not the order of the ports, volumes and variables, nor blanks around a value).
+ * Whether saving current instead of initial recreates the container (the backend's rule: anything but name, restart
+ * policy and limits, and not the order of the ports, volumes, variables and labels, nor blanks around a value or a
+ * label key; removing a limit too).
  */
 export function needsRecreate(initial: Spec, current: Spec): boolean {
   // each row as JSON with its keys in a fixed order, the rows sorted: equal sets of rows give equal lists
@@ -62,14 +86,19 @@ export function needsRecreate(initial: Spec, current: Spec): boolean {
         })),
       ),
       env: rows(s.env.map((e) => ({ name: e.name.trim(), value: e.value }))),
+      labels: rows(s.labels.map((l) => ({ key: l.key.trim(), value: l.value }))),
     });
-  return key(initial) !== key(current);
+  const removed =
+    (initial.resources.memory > 0 && current.resources.memory === 0) ||
+    (nanoCPUs(initial.resources) > 0 && nanoCPUs(current.resources) === 0);
+  return removed || key(initial) !== key(current);
 }
 
-/** The JSON for the backend: without the view-only flag of anonymous volumes. */
+/** The JSON for the backend: without the view-only flag of anonymous volumes, the label keys without blanks around them. */
 function payload(s: Spec): Spec {
   const copy = structuredClone(unwrap(s));
   copy.mounts = copy.mounts.map(({ anonymous: _anonymous, ...m }) => m);
+  copy.labels = copy.labels.map((l) => ({ key: l.key.trim(), value: l.value }));
   return copy;
 }
 
@@ -84,7 +113,8 @@ function Section(props: { title: string; children: JSX.Element }) {
 
 function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
   const api = useApi();
-  const { t } = useI18n();
+  const i18n = useI18n();
+  const { t, locale } = i18n;
   const toast = useToast();
   const navigate = useExtensionNavigate();
   const [spec, setSpec] = createStore<Spec>(structuredClone(props.initial));
@@ -93,22 +123,54 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
   const [pulling, setPulling] = createSignal<PullStart>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<unknown>();
-  const [volumes] = createResource(() => api.get<Volume[]>("/volumes").catch(() => [] as Volume[]));
+  const [volumes] = createResource(() => api.get<Volume[]>("/volumes"));
   const [networks] = createResource(() =>
     api.get<NetworkInfo[]>("/networks").catch(() => [] as NetworkInfo[]),
   );
+  // the host's CPUs and memory, for the hints of the limits; without them the hints name no maximum
+  const [host] = createResource(() => api.get<Status>("/status").catch(() => undefined));
+  // The hints wait for the answer: one that gains its maximum a moment later would flash. A failed request is an
+  // answer too (the hints without maximum).
+  const hostAnswered = () => host.state === "ready";
   const recreates = () => props.mode === "edit" && needsRecreate(props.initial, spec);
+
+  // The memory limit is typed as a number with a unit; the form keeps the bytes. The unit is GiB when the stored limit
+  // is a whole number of GiB, else MiB (a limit of 1536 MiB reads 1536, not 1.5).
+  const initialMemory = props.initial.resources.memory;
+  const [unit, setUnit] = createSignal<"MiB" | "GiB">(
+    initialMemory > 0 && initialMemory % GiB === 0 ? "GiB" : "MiB",
+  );
+  const initialMemoryText = initialMemory > 0 ? String(initialMemory / (unit() === "GiB" ? GiB : MiB)) : "";
+  // The fields are not written back while the user types: a number field of a browser reports "" for a half-typed
+  // "1." and clears itself when a new value is assigned. They show their first value and keep what is typed.
+  let memoryText = initialMemoryText;
+  const initialCpus = props.initial.resources.cpus;
+  const applyMemory = () => {
+    const n = Number(memoryText.replace(",", "."));
+    if (memoryText.trim() === "" || !(n > 0)) return setSpec("resources", "memory", 0);
+    // What the backend refuses must reach it, not turn into no limit on the way: at least one byte (a smaller number
+    // rounds to 0), and at most the largest safe integer (JSON writes Infinity as null, and a number like 1e+30 is no
+    // integer for the backend); that is far above its maximum of 1 PiB, so it answers with an error of the field.
+    const bytes = Math.max(1, Math.round(n * (unit() === "GiB" ? GiB : MiB)));
+    setSpec("resources", "memory", Math.min(bytes, Number.MAX_SAFE_INTEGER));
+  };
+  // Advice only, nothing is blocked: the backend's own maximum is far above any host (1 PiB), and a limit above the
+  // memory of this host may have its reason (a host that grows, swap).
+  const memoryOverHost = () => {
+    const max = host()?.memory ?? 0;
+    return max > 0 && spec.resources.memory > max;
+  };
   // the backend names the rows of this form (ports.1.hostPort is the second port), in the order they were sent
   const invalid = (field: string) => {
     const f = errorField(error());
     return f === field || (f?.startsWith(`${field}.`) ?? false);
   };
-  const knownVolume = (name: string) => (volumes() ?? []).some((v) => v.name === name);
 
   const save = async () => {
     try {
       if (props.mode === "create") {
         const res = await api.post<CreateResult>("/containers", { ...payload(spec), start: startNow() });
+        for (const w of res.warnings ?? []) toast.info(w);
         if (res.warning) toast.info(res.warning);
         else toast.success(t("form.created", { name: spec.name }));
         navigate(`/containers/${res.id}`);
@@ -117,6 +179,7 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
           `/containers/${encodeURIComponent(props.id ?? "")}`,
           payload(spec),
         );
+        for (const w of res.warnings ?? []) toast.info(w);
         if (res.warning) toast.info(res.warning);
         else toast.success(t(res.recreated ? "form.recreated" : "form.saved", { name: spec.name }));
         navigate(`/containers/${res.id}`);
@@ -288,114 +351,116 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
       </Section>
 
       <Section title={t("form.mounts")}>
-        <datalist id="docker-volume-names">
-          <For each={(volumes() ?? []).filter((v) => !v.anonymous)}>
-            {(v) => <option value={v.name}>{v.driver}</option>}
-          </For>
-        </datalist>
-        <Index each={spec.mounts}>
-          {(m, i) => (
-            <div class="flex flex-wrap items-end gap-2 border-b border-base-200 pb-2" data-mount>
-              <div class="join">
-                <label
-                  class="join-item btn btn-sm"
-                  classList={{ "btn-active": m().type === "volume", "btn-disabled": !!m().anonymous }}
-                >
-                  <input
-                    type="radio"
-                    class="sr-only"
-                    name={`mount-type-${i}`}
-                    checked={m().type === "volume"}
-                    disabled={m().anonymous}
-                    aria-label={t("form.mountVolume")}
-                    onChange={() => setMount(i, { type: "volume", source: "", anonymous: false })}
-                  />
-                  {t("form.mountVolume")}
-                </label>
-                <label
-                  class="join-item btn btn-sm"
-                  classList={{ "btn-active": m().type === "bind", "btn-disabled": !!m().anonymous }}
-                >
-                  <input
-                    type="radio"
-                    class="sr-only"
-                    name={`mount-type-${i}`}
-                    checked={m().type === "bind"}
-                    disabled={m().anonymous}
-                    aria-label={t("form.mountBind")}
-                    onChange={() => setMount(i, { type: "bind", source: "", anonymous: false })}
-                  />
-                  {t("form.mountBind")}
-                </label>
-              </div>
-              <Show
-                when={m().type === "volume"}
-                fallback={
-                  <label class="flex flex-col gap-1">
-                    <span class="text-xs">{t("form.hostPath")}</span>
-                    <Input
-                      class="input-sm w-56 font-mono"
-                      placeholder="/srv/data"
-                      invalid={invalid(`mounts.${i}.source`)}
-                      value={m().source}
-                      onInput={(e) => setMount(i, { source: e.currentTarget.value })}
+        {/* For, not Index: a row keeps its own state (VolumeSelect's "new volume") when another row is removed */}
+        <For each={spec.mounts}>
+          {(m, i) => {
+            // the radio group of the row must not change with its index
+            const group = createUniqueId();
+            return (
+              <div class="flex flex-wrap items-end gap-2 border-b border-base-200 pb-2" data-mount>
+                <div class="join">
+                  <label
+                    class="join-item btn btn-sm"
+                    classList={{ "btn-active": m.type === "volume", "btn-disabled": !!m.anonymous }}
+                  >
+                    <input
+                      type="radio"
+                      class="sr-only"
+                      name={`mount-type-${group}`}
+                      checked={m.type === "volume"}
+                      disabled={m.anonymous}
+                      aria-label={t("form.mountVolume")}
+                      onChange={() => setMount(i(), { type: "volume", source: "", anonymous: false })}
                     />
+                    {t("form.mountVolume")}
                   </label>
-                }
-              >
-                <label class="flex flex-col gap-1">
-                  <span class="text-xs">{t("form.volumeName")}</span>
-                  <Input
-                    class="input-sm w-56"
-                    list="docker-volume-names"
-                    placeholder={t("form.volumeHint")}
-                    readOnly={m().anonymous}
-                    title={m().anonymous ? m().source : undefined}
-                    invalid={invalid(`mounts.${i}.source`)}
-                    value={m().anonymous ? m().source.slice(0, 12) : m().source}
-                    onInput={(e) => setMount(i, { source: e.currentTarget.value })}
-                  />
-                </label>
-                <Show when={m().anonymous}>
-                  <span class="badge badge-ghost badge-sm">{t("detail.anonymous")}</span>
-                </Show>
+                  <label
+                    class="join-item btn btn-sm"
+                    classList={{ "btn-active": m.type === "bind", "btn-disabled": !!m.anonymous }}
+                  >
+                    <input
+                      type="radio"
+                      class="sr-only"
+                      name={`mount-type-${group}`}
+                      checked={m.type === "bind"}
+                      disabled={m.anonymous}
+                      aria-label={t("form.mountBind")}
+                      onChange={() => setMount(i(), { type: "bind", source: "", anonymous: false })}
+                    />
+                    {t("form.mountBind")}
+                  </label>
+                </div>
                 <Show
-                  when={
-                    !m().anonymous && m().source.trim() !== "" && volumes() && !knownVolume(m().source.trim())
+                  when={m.type === "volume"}
+                  fallback={
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs">{t("form.hostPath")}</span>
+                      <Input
+                        class="input-sm w-56 font-mono"
+                        placeholder="/srv/data"
+                        invalid={invalid(`mounts.${i()}.source`)}
+                        value={m.source}
+                        onInput={(e) => setMount(i(), { source: e.currentTarget.value })}
+                      />
+                    </label>
                   }
                 >
-                  <span class="badge badge-info badge-sm">{t("form.newVolume")}</span>
+                  <Show
+                    when={!m.anonymous}
+                    fallback={
+                      <>
+                        <label class="flex flex-col gap-1">
+                          <span class="text-xs">{t("form.volumeName")}</span>
+                          <Input
+                            class="input-sm w-56"
+                            readOnly
+                            title={m.source}
+                            value={m.source.slice(0, 12)}
+                          />
+                        </label>
+                        <span class="badge badge-ghost badge-sm">{t("detail.anonymous")}</span>
+                      </>
+                    }
+                  >
+                    <VolumeSelect
+                      value={m.source}
+                      volumes={volumes.error ? undefined : volumes()}
+                      failed={volumes.error}
+                      invalid={invalid(`mounts.${i()}.source`)}
+                      onChange={(name) => setMount(i(), { source: name })}
+                    />
+                  </Show>
                 </Show>
-              </Show>
-              <label class="flex flex-col gap-1">
-                <span class="text-xs">{t("form.target")}</span>
-                <Input
-                  class="input-sm w-56 font-mono"
-                  placeholder="/data"
-                  invalid={invalid(`mounts.${i}.target`)}
-                  value={m().target}
-                  onInput={(e) => setMount(i, { target: e.currentTarget.value })}
-                />
-              </label>
-              <label class="flex items-center gap-1">
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-sm"
-                  checked={m().readOnly}
-                  onChange={(e) => setMount(i, { readOnly: e.currentTarget.checked })}
-                />
-                <span class="text-xs">{t("form.readOnly")}</span>
-              </label>
-              <button
-                type="button"
-                class="btn btn-sm btn-ghost"
-                onClick={() => setSpec("mounts", (ms) => ms.filter((_, j) => j !== i))}
-              >
-                {t("actions.remove")}
-              </button>
-            </div>
-          )}
-        </Index>
+                <label class="flex flex-col gap-1">
+                  <span class="text-xs">{t("form.target")}</span>
+                  <Input
+                    class="input-sm w-56 font-mono"
+                    placeholder="/data"
+                    invalid={invalid(`mounts.${i()}.target`)}
+                    value={m.target}
+                    onInput={(e) => setMount(i(), { target: e.currentTarget.value })}
+                  />
+                </label>
+                <label class="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    checked={m.readOnly}
+                    onChange={(e) => setMount(i(), { readOnly: e.currentTarget.checked })}
+                  />
+                  <span class="text-xs">{t("form.readOnly")}</span>
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-sm btn-ghost"
+                  onClick={() => setSpec("mounts", (ms) => ms.filter((_, j) => j !== i()))}
+                >
+                  {t("actions.remove")}
+                </button>
+              </div>
+            );
+          }}
+        </For>
         <button
           type="button"
           class="btn btn-sm btn-ghost self-start"
@@ -447,6 +512,46 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
         </button>
       </Section>
 
+      <Section title={t("form.labels")}>
+        <Index each={spec.labels}>
+          {(l, i) => (
+            <div class="flex flex-wrap items-end gap-2" data-label>
+              <label class="flex flex-col gap-1">
+                <span class="text-xs">{t("form.labelKey")}</span>
+                <Input
+                  class="input-sm w-48 font-mono"
+                  invalid={invalid(`labels.${i}.key`)}
+                  value={l().key}
+                  onInput={(e) => setSpec("labels", i, "key", e.currentTarget.value)}
+                />
+              </label>
+              <label class="flex flex-1 flex-col gap-1">
+                <span class="text-xs">{t("form.labelValue")}</span>
+                <input
+                  class="input input-sm font-mono"
+                  value={l().value}
+                  onInput={(e) => setSpec("labels", i, "value", e.currentTarget.value)}
+                />
+              </label>
+              <button
+                type="button"
+                class="btn btn-sm btn-ghost"
+                onClick={() => setSpec("labels", (ls) => ls.filter((_, j) => j !== i))}
+              >
+                {t("actions.remove")}
+              </button>
+            </div>
+          )}
+        </Index>
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost self-start"
+          onClick={() => setSpec("labels", (ls) => [...ls, { key: "", value: "" }])}
+        >
+          {t("form.addLabel")}
+        </button>
+      </Section>
+
       <Section title={t("form.network")}>
         <label class="flex flex-col gap-1">
           <span class="text-sm">{t("form.network")}</span>
@@ -492,6 +597,81 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
             />
           </label>
         </Show>
+      </Section>
+
+      <Section title={t("form.resources")}>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="flex flex-col gap-1">
+            <span class="text-xs">{t("form.memoryLimit")}</span>
+            {/* step any: the number may have decimals (1.5 GiB), and a stored limit may be no whole MiB */}
+            <Input
+              class="input-sm w-32"
+              type="number"
+              min="0"
+              step="any"
+              aria-describedby="docker-memory-hint"
+              invalid={invalid("resources.memory")}
+              value={initialMemoryText}
+              onInput={(e) => {
+                memoryText = e.currentTarget.value;
+                applyMemory();
+              }}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs">{t("form.unit")}</span>
+            <Select
+              class="select-sm w-24"
+              value={unit()}
+              onChange={(e) => {
+                setUnit(e.currentTarget.value as "MiB" | "GiB");
+                applyMemory();
+              }}
+            >
+              <option value="MiB" selected={unit() === "MiB"}>
+                MiB
+              </option>
+              <option value="GiB" selected={unit() === "GiB"}>
+                GiB
+              </option>
+            </Select>
+          </label>
+          <span
+            id="docker-memory-hint"
+            class="pb-2 text-xs"
+            classList={{ "text-warning": memoryOverHost(), "text-base-content/70": !memoryOverHost() }}
+          >
+            <Show when={hostAnswered()}>
+              {host()?.memory
+                ? t("form.memoryHint", { size: formatBytes(host()?.memory ?? 0, locale()) })
+                : t("form.memoryHintNoMax")}
+            </Show>
+          </span>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="flex flex-col gap-1">
+            <span class="text-xs">{t("form.cpuLimit")}</span>
+            {/* min is the base of the steps: 0.01 with step 0.1 would make 0.5 or 1.5 a step a browser refuses */}
+            <Input
+              class="input-sm w-32"
+              type="number"
+              min="0.01"
+              step="any"
+              aria-describedby="docker-cpu-hint"
+              invalid={invalid("resources.cpus")}
+              value={initialCpus > 0 ? String(initialCpus) : ""}
+              onInput={(e) => {
+                const n = Number(e.currentTarget.value.replace(",", "."));
+                setSpec("resources", "cpus", n > 0 ? n : 0);
+              }}
+            />
+          </label>
+          <span id="docker-cpu-hint" class="pb-2 text-xs text-base-content/70">
+            <Show when={hostAnswered()}>
+              {host()?.cpus ? tPlural(i18n, "form.cpuHint", host()?.cpus ?? 0) : t("form.cpuHintNoMax")}
+            </Show>
+          </span>
+        </div>
       </Section>
 
       <Section title={t("form.advanced")}>

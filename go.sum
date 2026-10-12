@@ -1,7 +1,7 @@
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/Pukka922/edelweiss/sdk v0.1.0 h1:L7987Xt2IwxmwEHJbeYuFOZJHKRARjK3BdPsqmuuov8=
-github.com/Pukka922/edelweiss/sdk v0.1.0/go.mod h1:BXRAMki9vcZ9JEKDKipOkgGBXjD+/JYyoimHhzd6n2o=
+github.com/Pukka922/edelweiss/sdk v0.2.0 h1:Lh++yhAg7d2tvS2V9ZDgvhuRpA/BocknhDJ77rZEOI0=
+github.com/Pukka922/edelweiss/sdk v0.2.0/go.mod h1:BXRAMki9vcZ9JEKDKipOkgGBXjD+/JYyoimHhzd6n2o=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
 github.com/containerd/errdefs v1.0.0/go.mod h1:+YBYIdtsnF4Iw6nWZhJcqGSg/dwvV7tyJ/kCkyJ2k+M=
 github.com/containerd/errdefs/pkg v0.3.0 h1:9IKJ06FvyNlexW690DXuQNx2KA2cUJXx151Xdx3ZPPE=
