@@ -48,6 +48,13 @@ func InvalidID() error {
 		WithDetails(map[string]any{"field": "id"})
 }
 
+// InvalidName is the answer for a volume or network :name or :id that SafeName refuses: 400 invalid_request with
+// details.field set to field ("name" or "id").
+func InvalidName(field, kind string) error {
+	return sdk.NewError(fiber.StatusBadRequest, "invalid_request", field+" must be the name or the ID of a "+kind).
+		WithDetails(map[string]any{"field": field})
+}
+
 // Error turns the error of a Docker call into the extension's answer. An *sdk.APIError passes through unchanged.
 func Error(err error) error {
 	if err == nil {

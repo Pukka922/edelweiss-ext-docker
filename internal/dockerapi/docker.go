@@ -79,6 +79,14 @@ var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 // such an id does reach a handler.
 func SafeID(id string) bool { return idPattern.MatchString(id) }
 
+// MaxNameLength bounds the names of volumes and networks (the longest a file name can be).
+const MaxNameLength = 255
+
+// SafeName reports whether name can be the :name or :id of a volume or network route: Docker's rule for these names
+// (SafeID, which also takes the 64 hex characters of an ID) with a bound on the length. Check it before the daemon is
+// called: the client escapes the name into one URL segment, but a name that is no name should never get that far.
+func SafeName(name string) bool { return len(name) <= MaxNameLength && SafeID(name) }
+
 // SafeRef reports whether an image reference can go into the URL path of the daemon request unchanged: the Docker client
 // builds the path with path.Join, which would clean a leading slash or a "." or ".." segment into another endpoint, and
 // "?" or "#" would start a query or a fragment.

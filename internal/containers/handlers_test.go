@@ -317,7 +317,8 @@ func TestRoutesRefuseUnsafeIds(t *testing.T) {
 	routes := []struct{ method, suffix string }{
 		{"GET", ""}, {"DELETE", ""}, {"POST", "/start"}, {"POST", "/stop"}, {"POST", "/restart"},
 	}
-	for _, id := range []string{".", "..", "..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
+	// "." and ".." are not here: the path is cleaned before routing since Fiber 3.6 / fasthttp 1.75 (see TestDotSegmentIdsNeverReachDocker).
+	for _, id := range []string{"..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
 		for _, r := range routes {
 			target := "/containers/" + id + r.suffix
 			resp := sdktest.Do(t, app, sdktest.Request(r.method, target, nil, anna))

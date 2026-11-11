@@ -662,7 +662,7 @@ function Form(props: { mode: "create" | "edit"; initial: Spec; id?: string }) {
               value={initialCpus > 0 ? String(initialCpus) : ""}
               onInput={(e) => {
                 const n = Number(e.currentTarget.value.replace(",", "."));
-                setSpec("resources", "cpus", n > 0 ? n : 0);
+                setSpec("resources", "cpus", Math.max(n || 0, 0));
               }}
             />
           </label>

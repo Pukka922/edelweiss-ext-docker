@@ -405,7 +405,8 @@ func TestConsoleRefusesUnsafeIDs(t *testing.T) {
 		return client.ExecCreateResult{}, errors.New("must not be called")
 	}}
 	base := serve(t, d)
-	for _, id := range []string{".", "..", "..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
+	// "." and ".." are not here: the path is cleaned before routing since Fiber 3.6 / fasthttp 1.75 (see TestDotSegmentIdsNeverReachDocker).
+	for _, id := range []string{"..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
 		c, resp, err := fws.DefaultDialer.Dial(base+"/containers/"+id+"/console", nil)
 		if err == nil {
 			c.Close()
@@ -426,5 +427,53 @@ func TestConsoleRefusesUnsafeIDs(t *testing.T) {
 	defer mu.Unlock()
 	if len(created) != 0 {
 		t.Fatalf("Docker must not be called for these ids, ExecCreate ran for %q", created)
+	}
+}
+
+// Since Fiber 3.6 / fasthttp 1.75 the request path is cleaned (RFC 3986 dot-segment removal) before routing, so a "." or
+// ".." segment in the id position no longer reaches a handler as an id. The property that matters, and that this test
+// pins, is that Docker never sees "." or ".." as an id or name (a traversal inside the daemon's URL path).
+func TestConsoleDotSegmentIDsNeverReachDocker(t *testing.T) {
+	var mu sync.Mutex
+	var created []string
+	d := &dockertest.Fake{ExecCreateFn: func(_ context.Context, id string, _ client.ExecCreateOptions) (client.ExecCreateResult, error) {
+		mu.Lock()
+		created = append(created, id)
+		mu.Unlock()
+		return client.ExecCreateResult{}, errors.New("fake: no exec")
+	}}
+	base := serve(t, d)
+	// Every one of these cleaned paths (/containers/console, or a path without a route) is a plain 404, not an upgrade.
+	for _, id := range []string{".", "..", "%2e", "%2e%2e", "%2E%2E", ".%2e", "%2e."} {
+		c, resp, err := fws.DefaultDialer.Dial(base+"/containers/"+id+"/console", nil)
+		if err == nil {
+			c.Close()
+			t.Errorf("%s: the upgrade succeeded", id)
+			continue
+		}
+		if resp == nil {
+			t.Errorf("%s: no answer: %v", id, err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 404 {
+			t.Errorf("%s: %d, want 404", id, resp.StatusCode)
+		}
+	}
+	mu.Lock()
+	if len(created) != 0 {
+		t.Errorf("ExecCreate ran for %q", created)
+	}
+	mu.Unlock()
+
+	// Positive control: an ordinary id upgrades and reaches ExecCreate, so the checks above cannot pass vacuously.
+	if c, _, err := fws.DefaultDialer.Dial(base+"/containers/web/console", nil); err == nil {
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // the handler reports the failed exec and closes
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(created) != 1 || created[0] != "web" {
+		t.Fatalf("ExecCreate ran for %q, want [web]", created)
 	}
 }

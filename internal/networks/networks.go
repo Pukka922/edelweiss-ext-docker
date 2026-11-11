@@ -112,8 +112,22 @@ func (h handlers) list(c fiber.Ctx) error {
 	return c.JSON(out)
 }
 
+// networkID is the :id of the route, or 400 invalid_request (field "id") for anything but a network name or ID; the
+// routes call it before they talk to Docker. The result is a copy: Fiber reuses the buffer behind c.Params.
+func networkID(c fiber.Ctx) (string, error) {
+	id := c.Params("id")
+	if !dockerapi.SafeName(id) {
+		return "", dockerapi.InvalidName("id", "network")
+	}
+	return strings.Clone(id), nil
+}
+
 func (h handlers) get(c fiber.Ctx) error {
-	res, err := h.docker.NetworkInspect(c.Context(), c.Params("id"), client.NetworkInspectOptions{})
+	id, err := networkID(c)
+	if err != nil {
+		return err
+	}
+	res, err := h.docker.NetworkInspect(c.Context(), id, client.NetworkInspectOptions{})
 	if err != nil {
 		return dockerapi.Error(err)
 	}
@@ -188,6 +202,10 @@ func (h handlers) create(c fiber.Ctx) error {
 }
 
 func (h handlers) connect(c fiber.Ctx) error {
+	id, err := networkID(c)
+	if err != nil {
+		return err
+	}
 	var req ConnectRequest
 	if err := httpx.Body(c, &req); err != nil {
 		return err
@@ -203,13 +221,17 @@ func (h handlers) connect(c fiber.Ctx) error {
 		}
 		opts.EndpointConfig = &network.EndpointSettings{IPAMConfig: &network.EndpointIPAMConfig{IPv4Address: ip}}
 	}
-	if _, err := h.docker.NetworkConnect(c.Context(), c.Params("id"), opts); err != nil {
+	if _, err := h.docker.NetworkConnect(c.Context(), id, opts); err != nil {
 		return dockerapi.Error(err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
 func (h handlers) disconnect(c fiber.Ctx) error {
+	id, err := networkID(c)
+	if err != nil {
+		return err
+	}
 	var req ConnectRequest
 	if err := httpx.Body(c, &req); err != nil {
 		return err
@@ -217,14 +239,18 @@ func (h handlers) disconnect(c fiber.Ctx) error {
 	if strings.TrimSpace(req.Container) == "" {
 		return invalid("container", "is required")
 	}
-	if _, err := h.docker.NetworkDisconnect(c.Context(), c.Params("id"), client.NetworkDisconnectOptions{Container: strings.TrimSpace(req.Container)}); err != nil {
+	if _, err := h.docker.NetworkDisconnect(c.Context(), id, client.NetworkDisconnectOptions{Container: strings.TrimSpace(req.Container)}); err != nil {
 		return dockerapi.Error(err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
 func (h handlers) remove(c fiber.Ctx) error {
-	res, err := h.docker.NetworkInspect(c.Context(), c.Params("id"), client.NetworkInspectOptions{})
+	id, err := networkID(c)
+	if err != nil {
+		return err
+	}
+	res, err := h.docker.NetworkInspect(c.Context(), id, client.NetworkInspectOptions{})
 	if err != nil {
 		return dockerapi.Error(err)
 	}

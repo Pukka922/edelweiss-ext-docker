@@ -1,6 +1,6 @@
 {
   "id": "docker",
-  "version": "0.2.0",
+  "version": "0.0.0-dev",
   "apiVersion": 1,
   "name": { "de": "Docker", "en": "Docker" },
   "description": {

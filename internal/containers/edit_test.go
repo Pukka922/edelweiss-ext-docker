@@ -952,7 +952,8 @@ func TestEditRouteRefusesUnsafeIds(t *testing.T) {
 	}
 	app := testApp(f)
 	body := toJSONUnit(t, changed())
-	for _, id := range []string{".", "..", "..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
+	// "." and ".." are not here: the path is cleaned before routing since Fiber 3.6 / fasthttp 1.75 (see TestDotSegmentIdsNeverReachDocker).
+	for _, id := range []string{"..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
 		resp := sdktestDo(t, app, "PUT", "/containers/"+id, body)
 		if raw := readAll(t, resp); resp.StatusCode != 400 || !strings.Contains(raw, "invalid_request") || !strings.Contains(raw, `"field":"id"`) {
 			t.Errorf("PUT /containers/%s: %d %s", id, resp.StatusCode, raw)

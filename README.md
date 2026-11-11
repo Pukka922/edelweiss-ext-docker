@@ -146,7 +146,7 @@ To try the extension, start the edelweiss dev environment with its own Docker da
 `EXT_SYSTEM_DIR=<path>` set) and stops with a message if there is none.
 
 ```sh
-make release
+make release VERSION=0.2.0
 mkdir -p ../edelweiss/build
 cp dist/edelweiss-ext-docker_0.2.0_linux_amd64 ../edelweiss/build/
 cd ../edelweiss
@@ -170,19 +170,26 @@ Files have LF line endings (`.gitattributes`, `.editorconfig`), also in a Window
 
 ## Releasing
 
-1. Set the new version in `manifest.json` and commit. It has to be a plain `x.y.z` or `x.y.z-pre` by the rules of Go (no
-   leading zeros, no empty pre-release identifier, no `+build` metadata).
-2. Check it with `make release-check VERSION=<version>`.
-3. Push `main`, then the tag: `git push origin main`, then `git tag v<version> && git push origin v<version>`.
+No file needs changing for a release: the git tag is the only source of the version.
+
+1. Check the version with `make release-check VERSION=<version>`. It has to be a plain `x.y.z` or `x.y.z-pre` by the
+   rules of Go (no leading zeros, no empty pre-release identifier, no `+build` metadata).
+2. Push `main`, then the tag, which decides the version: `git push origin main`, then
+   `git tag v<version> && git push origin v<version>`.
+
+`manifest.json` holds the placeholder version `0.0.0-dev`. The release build puts the version of the tag into the
+binaries (`-ldflags -X main.version`) and checks it by running the binary for the build machine with
+`--edelweiss-manifest`, because edelweiss refuses a binary whose manifest version differs from the version in the name
+of the release file. A local `make build` without `VERSION` reports `0.0.0-dev`.
 
 The release workflow (`.github/workflows/release.yml`) has two jobs, so that the build cannot use the write token.
 `build` has a read-only token and keeps no credentials in the checkout. It checks the tag name (`v` and then only
 letters, digits, `.`, `+` and `-`), then runs three make targets and hands `dist/` on as a workflow artifact:
 
-- `make release-check`: the tag must match the manifest's version, a plain `x.y.z` or `x.y.z-pre`;
+- `make release-check`: the tag is a plain `x.y.z` or `x.y.z-pre`;
 - `make lint test`: the checks and unit tests of the CI workflow, so a tag on a commit that fails them publishes
   nothing (the integration tests run in the CI workflow; tag a commit whose CI run passed);
-- `make release`: the release files in `dist/`.
+- `make release`: the release files in `dist/`, with the version of the tag in the binaries.
 
 `publish` runs when `build` has succeeded. It holds the write token (gh needs it), builds nothing, needs neither Go nor
 Node and keeps no credentials in its checkout either; only the `gh-release` step gets the token, through `GH_TOKEN`. It

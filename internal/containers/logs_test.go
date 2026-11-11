@@ -306,7 +306,8 @@ func TestStreamsRefuseUnsafeIds(t *testing.T) {
 		return client.ContainerInspectResult{Container: container.InspectResponse{ID: id, State: &container.State{}}}, nil
 	}}
 	app := testApp(f)
-	for _, id := range []string{".", "..", "..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
+	// "." and ".." are not here: the path is cleaned before routing since Fiber 3.6 / fasthttp 1.75 (see TestDotSegmentIdsNeverReachDocker).
+	for _, id := range []string{"..%2Fimages%2Fx", ".hidden", "-web", "web%2F..", "we%20b"} {
 		for _, suffix := range []string{"/logs", "/stats"} {
 			target := "/containers/" + id + suffix
 			resp := sdktest.Do(t, app, sdktest.Request("GET", target, nil, anna))

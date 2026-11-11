@@ -10,12 +10,9 @@ GO_PKGS := . ./internal/...
 SDK_MODULE := github.com/Pukka922/edelweiss/sdk
 ACTIONLINT := github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
-MANIFEST_VERSION := $(shell sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' manifest.json)
-ifeq ($(MANIFEST_VERSION),)
-$(error cannot read the version from manifest.json)
-endif
-# The version of a release (the tag without "v"); make release-check compares it with the manifest.
-VERSION ?= $(MANIFEST_VERSION)
+# The version of a release, the tag without "v"; there is no default. release-check, release and gh-release need it.
+# build passes it into the binaries when it is set; otherwise they report the placeholder 0.0.0-dev of manifest.json.
+VERSION ?=
 # The files of a release in dist/, besides checksums.txt: make release writes them, make gh-release uploads exactly these.
 RELEASE_FILES = $(foreach arch,$(ARCHES),$(BINARY)_$(VERSION)_linux_$(arch))
 
@@ -24,11 +21,13 @@ UI_DEPS := ui/node_modules/.package-lock.json
 
 .PHONY: build ui test test-docker lint lint-workflows release-check release gh-release dev-sdk tidy
 
-# The UI (embedded by main.go), then static binaries for amd64 and arm64 in build/.
-build: ui
+# The UI (embedded by main.go), then static binaries for amd64 and arm64 in build/. A VERSION that reaches the binaries has
+# to pass release-check first, however build is started (a binary with an invalid version panics at start); without a
+# VERSION, build needs none.
+build: $(if $(VERSION),release-check) ui
 	mkdir -p build
 	for arch in $(ARCHES); do \
-		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags "-s -w" \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $(GO) build -trimpath -ldflags "-s -w $(if $(VERSION),-X main.version=$(VERSION))" \
 			-o build/$(BINARY)_linux_$$arch . || exit 1; \
 	done
 
@@ -54,17 +53,21 @@ lint:$(UI_DEPS) lint-workflows
 lint-workflows:
 	GOWORK=off $(GO) run $(ACTIONLINT) -shellcheck= -pyflakes=
 
-# The first check is the format of VERSION, by Go's rules for a version without the v: x.y.z or x.y.z-pre, numbers without
-# leading zeros, no empty pre-release identifier and no leading zero in a numeric one, and no +build metadata (Go
-# ignores it in a version tag). The value reaches the check through the environment, so the shell does not parse it as
-# code, and the line after it only runs for a plain version. That protects the shell lines only: make itself still
-# expands $(...) in a VERSION from the command line, so the tag-name check of the release workflow is the real boundary
-# there.
+# The tag is the only source of the version, so release-check does not compare it with manifest.json (make release puts
+# it into the binaries and checks it there). It checks that VERSION is given, and then its format, by Go's rules for a
+# version without the v: x.y.z or x.y.z-pre, numbers without leading zeros, no empty pre-release identifier and no
+# leading zero in a numeric one, and no +build metadata (Go ignores it in a version tag). The value reaches the check
+# through the environment, so the shell does not parse it as code, and the line after it only runs for a plain version.
+# That protects the shell lines only: make itself still expands $(...) in a VERSION from the command line, so the
+# tag-name check of the release workflow is the real boundary there.
 # One pre-release identifier: digits without a leading zero, or characters of 0-9A-Za-z- with a letter or a hyphen.
 SEMVER_ID := (0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)
 SEMVER_RE := ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-$(SEMVER_ID)(\.$(SEMVER_ID))*)?$$
 release-check: export RELEASE_CHECK_VERSION := $(VERSION)
 release-check:
+	@test -n "$$RELEASE_CHECK_VERSION" || { \
+		echo "release-check: VERSION is required: the version of the release, the tag without v (make release VERSION=0.2.0)" >&2; \
+		exit 1; }
 	@export LC_ALL=C; bad=; \
 	case "$$RELEASE_CHECK_VERSION" in \
 		""|*[!0-9A-Za-z.-]*) bad=1 ;; \
@@ -73,16 +76,27 @@ release-check:
 	test -z "$$bad" || { \
 		printf 'release-check: VERSION=%s is not a version like 0.1.0 or 0.2.0-rc.1 (no v prefix, no +build metadata, no leading zeros)\n' \
 			"$$RELEASE_CHECK_VERSION" >&2; exit 1; }
-	@test "$(VERSION)" = "$(MANIFEST_VERSION)" || { \
-		echo "release-check: version $(VERSION) does not match manifest.json ($(MANIFEST_VERSION)); the tag must be v$(MANIFEST_VERSION)" >&2; \
-		exit 1; }
 	@echo "release-check: $(VERSION) OK"
 
-# The release files in dist/ (the release workflow uploads all of them).
+# The release files in dist/ (the release workflow uploads all of them), with the version of the tag in the binaries.
+# Before it writes checksums.txt, it runs the binary for this machine with --edelweiss-manifest and compares the version
+# it prints with VERSION (a binary that fails stops the release too): edelweiss refuses a binary whose manifest version
+# differs from the version in its file name.
+# The other architecture cannot be run here, and a machine that is not linux or not one of ARCHES cannot run any of the
+# binaries; that stops the release instead of letting it go out unchecked (the release workflow runs on linux/amd64).
 release: release-check build
 	rm -rf dist
 	mkdir -p dist
 	for arch in $(ARCHES); do cp build/$(BINARY)_linux_$$arch dist/$(BINARY)_$(VERSION)_linux_$$arch || exit 1; done
+	@os=$$($(GO) env GOHOSTOS); arch=$$($(GO) env GOHOSTARCH); known=; \
+	case " $(ARCHES) " in *" $$arch "*) known=1 ;; esac; \
+	test "$$os" = linux -a -n "$$known" || { \
+		echo "release: the binaries cannot be run on this machine ($$os/$$arch) to check their version" >&2; exit 1; }; \
+	bin=dist/$(BINARY)_$(VERSION)_linux_$$arch; \
+	out=$$($$bin --edelweiss-manifest) || { echo "release: $$bin --edelweiss-manifest failed" >&2; exit 1; }; \
+	got=$$(printf '%s\n' "$$out" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'); \
+	test "$$got" = "$(VERSION)" || { \
+		echo "release: $$bin reports version \"$$got\", expected $(VERSION)" >&2; exit 1; }
 	cd dist && sha256sum $(RELEASE_FILES) > checksums.txt
 
 # Release workflow only (the publish job, which builds nothing): the GitHub release v<version> with the files of
@@ -123,7 +137,7 @@ dev-sdk:
 	rm -f go.work go.work.sum
 	$(GO) work init .
 	$(GO) work edit -replace $(SDK_MODULE)=$(EDELWEISS_ABS)/sdk
-	$(MAKE) -C $(EDELWEISS_ABS) sdk-pack
+	$(MAKE) -C $(EDELWEISS_ABS) sdk-pack VERSION=
 	v=$$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' $(EDELWEISS_ABS)/web/sdk/package.json) && \
 		cd ui && npm install --no-save --no-package-lock --no-audit --no-fund $(EDELWEISS_ABS)/dist/edelweiss-sdk-$$v.tgz
 

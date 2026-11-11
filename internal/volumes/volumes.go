@@ -100,6 +100,9 @@ func (h handlers) create(c fiber.Ctx) error {
 
 func (h handlers) remove(c fiber.Ctx) error {
 	name := c.Params("name")
+	if !dockerapi.SafeName(name) {
+		return dockerapi.InvalidName("name", "volume")
+	}
 	idx, err := usage.Load(c.Context(), h.docker)
 	if err != nil {
 		return dockerapi.Error(err)
