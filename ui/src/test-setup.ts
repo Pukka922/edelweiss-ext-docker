@@ -1,4 +1,5 @@
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
+import { resetListStates } from "./listing";
 
 // xterm measures with a canvas when it loads, and jsdom only reports "Not implemented" for that. A page that has the
 // console tab gets this stub; ConsoleTab.test.tsx brings a fake terminal of its own, which records what the tab does.
@@ -26,3 +27,6 @@ if (!("ResizeObserver" in window)) {
     disconnect() {}
   };
 }
+
+// the search and page of a list live in a module, so they would carry over from one test to the next
+afterEach(() => resetListStates());

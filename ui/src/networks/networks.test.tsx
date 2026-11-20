@@ -530,3 +530,94 @@ describe("NetworkDetail", () => {
     expect([reads("/networks/f"), reads("/containers")]).toEqual([3, 3]);
   });
 });
+
+describe("NetworkList sorting and search", () => {
+  const rowsOf = (view: ReturnType<typeof mount>) =>
+    view
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.querySelector("td")?.textContent?.trim());
+  const none: NetworkInfo = {
+    ...bridge,
+    id: "n",
+    name: "none",
+    driver: "null",
+    subnet: undefined,
+    gateway: undefined,
+  };
+  const lan: NetworkInfo = {
+    ...front,
+    id: "l",
+    name: "Lan10",
+    driver: "macvlan",
+    subnet: "192.168.1.0/24",
+    gateway: "192.168.1.1",
+    predefined: false,
+    internal: false,
+  };
+  const lan2: NetworkInfo = {
+    ...lan,
+    id: "l2",
+    name: "lan2",
+    driver: "bridge",
+    subnet: "10.9.0.0/16",
+    gateway: "10.9.0.1",
+  };
+
+  it("shows the networks sorted by name, the built-in ones too", async () => {
+    stubEventSource();
+    stubFetch({ "GET /networks": () => json(200, [none, lan, front, bridge, lan2]) });
+    const view = mount(NetworkList, { path: "/networks" });
+    await view.findByText("front");
+    expect(rowsOf(view).map((r) => r?.replace(/built in|internal/g, ""))).toEqual([
+      "bridge",
+      "front",
+      "lan2",
+      "Lan10",
+      "none",
+    ]);
+  });
+
+  it("searches name, driver, subnet and gateway", async () => {
+    stubEventSource();
+    stubFetch({ "GET /networks": () => json(200, [none, lan, front, bridge, lan2]) });
+    const view = mount(NetworkList, { path: "/networks" });
+    await view.findByText("front");
+    const search = view.getByRole("searchbox", { name: "Search networks …" });
+    const shown = () => rowsOf(view).map((r) => r?.replace(/built in|internal/g, ""));
+    fireEvent.input(search, { target: { value: "MACVLAN" } });
+    expect(shown()).toEqual(["Lan10"]);
+    fireEvent.input(search, { target: { value: "192.168" } });
+    expect(shown()).toEqual(["Lan10"]);
+    fireEvent.input(search, { target: { value: "10.9.0.1" } });
+    expect(shown()).toEqual(["lan2"]);
+    fireEvent.input(search, { target: { value: "bridge" } }); // the name and the driver
+    expect(shown()).toEqual(["bridge", "front", "lan2"]);
+    fireEvent.input(search, { target: { value: "zzz" } });
+    expect(view.getByText("No matches for “zzz”")).toBeTruthy();
+    expect(view.queryByRole("table")).toBeNull();
+  });
+});
+
+describe("NetworkDetail sorting", () => {
+  it("sorts the attached and the connectable containers by name", async () => {
+    stubEventSource();
+    stubFetch({
+      "GET /networks/f": () =>
+        json(200, {
+          ...detail,
+          attached: [
+            { id: "c3", name: "web10" },
+            { id: "c1", name: "Web2" },
+          ],
+        }),
+      "GET /containers": () =>
+        json(200, [container("c5", "db10"), container("c6", "db2"), container("c4", "API")]),
+    });
+    const view = mount(() => <NetworkDetail params={{ id: "f" }} />, { path: "/networks/f" });
+    await view.findByRole("option", { name: "db2" });
+    const attached = view.getAllByRole("button", { name: /^web/i }).map((b) => b.textContent);
+    expect(attached).toEqual(["Web2", "web10"]);
+    expect(view.getAllByRole("option").map((o) => o.textContent)).toEqual(["–", "API", "db2", "db10"]);
+  });
+});

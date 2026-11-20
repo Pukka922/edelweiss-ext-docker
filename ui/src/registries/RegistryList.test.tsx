@@ -306,3 +306,20 @@ describe("RegistryList", () => {
     });
   });
 });
+
+describe("RegistryList sorting", () => {
+  it("sorts the entries by name and has neither search nor pager", async () => {
+    stubEventSource();
+    const zed: Registry = { ...ghcr, id: "r3", name: "Zed" };
+    stubFetch({ "GET /registries": () => json(200, { registries: [zed, local, ghcr], writable: false }) });
+    const view = mount(RegistryList, { path: "/registries" });
+    await view.findByText("GHCR");
+    expect(
+      view
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) => r.querySelector("td")?.textContent),
+    ).toEqual(["GHCR", "Pi", "Zed"]);
+    expect(view.queryByRole("searchbox")).toBeNull();
+  });
+});

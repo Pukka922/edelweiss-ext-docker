@@ -3,6 +3,7 @@ import { createComputed, createMemo, createSignal, createUniqueId, For, Show } f
 import type { Volume } from "../api";
 import { Input, Select } from "../components/Field";
 import { errorText } from "../errors";
+import { compareNames } from "../listing";
 
 const NEW = "__new__";
 
@@ -20,7 +21,7 @@ export function VolumeSelect(props: {
   const { t } = useI18n();
   const errorId = createUniqueId();
   const named = createMemo(() =>
-    (props.volumes ?? []).filter((v) => !v.anonymous).sort((a, b) => a.name.localeCompare(b.name)),
+    (props.volumes ?? []).filter((v) => !v.anonymous).sort((a, b) => compareNames(a.name, b.name)),
   );
   const known = () => named().some((v) => v.name === props.value);
   // "New volume …" is a state that latches: the user chose it, or it is preselected because there is no volume to

@@ -12,6 +12,7 @@ import { createEffect, createResource, createSignal, For, Match, on, Show, Switc
 import type { RegistryList as List, Registry, TestResult } from "../api";
 import { IconButton } from "../components/IconButton";
 import { errorText } from "../errors";
+import { compareNames } from "../listing";
 import { RegistryDialog } from "./RegistryDialog";
 
 export function RegistryList() {
@@ -100,7 +101,11 @@ export function RegistryList() {
                   </tr>
                 </thead>
                 <tbody>
-                  <For each={d().registries}>
+                  <For
+                    each={d()
+                      .registries.slice()
+                      .sort((a, b) => compareNames(a.name, b.name))}
+                  >
                     {(r) => (
                       <tr>
                         <td class="font-medium">{r.name}</td>

@@ -195,3 +195,64 @@ describe("VolumeList", () => {
     expect(reads()).toBe(3);
   });
 });
+
+describe("VolumeList sorting and search", () => {
+  const rowsOf = (view: ReturnType<typeof mount>) =>
+    view
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.querySelector("td")?.textContent?.trim());
+
+  it("sorts named volumes by name and puts the anonymous ones last", async () => {
+    stubEventSource();
+    const anon2: Volume = { ...anon, name: "e".repeat(64) };
+    const a: Volume = { ...data, name: "alpha", usedBy: [] };
+    const b: Volume = { ...data, name: "Vol10", usedBy: [] };
+    const c: Volume = { ...data, name: "vol2", usedBy: [] };
+    stubFetch({ "GET /volumes": () => json(200, [anon, b, anon2, c, a]) });
+    const view = mount(VolumeList, { path: "/volumes" });
+    await view.findByText("alpha");
+    expect(rowsOf(view)).toEqual([
+      "alpha",
+      "vol2",
+      "Vol10",
+      "eeeeeeeeeeeeanonymous",
+      "ffffffffffffanonymous",
+    ]);
+  });
+
+  it("sorts the names in Used by", async () => {
+    stubEventSource();
+    const shared: Volume = {
+      ...data,
+      usedBy: [
+        { id: "c3", name: "web10" },
+        { id: "c1", name: "web2" },
+      ],
+    };
+    stubFetch({ "GET /volumes": () => json(200, [shared]) });
+    const view = mount(VolumeList, { path: "/volumes" });
+    await view.findByText("web-data");
+    expect(view.getAllByRole("button", { name: /^web\d/ }).map((b) => b.textContent)).toEqual([
+      "web2",
+      "web10",
+    ]);
+  });
+
+  it("searches name, driver and users", async () => {
+    stubEventSource();
+    const nfs: Volume = { ...data, name: "nas", driver: "nfs", usedBy: [] };
+    stubFetch({ "GET /volumes": () => json(200, [data, nfs, anon]) });
+    const view = mount(VolumeList, { path: "/volumes" });
+    await view.findByText("web-data");
+    const search = view.getByRole("searchbox", { name: "Search volumes …" });
+    fireEvent.input(search, { target: { value: "NAS" } });
+    expect(rowsOf(view)).toEqual(["nas"]);
+    fireEvent.input(search, { target: { value: "nfs" } });
+    expect(rowsOf(view)).toEqual(["nas"]);
+    fireEvent.input(search, { target: { value: "web" } }); // the name, and the user "web"
+    expect(rowsOf(view)).toEqual(["web-data"]);
+    fireEvent.input(search, { target: { value: "none" } });
+    expect(view.getByText("No matches for “none”")).toBeTruthy();
+  });
+});

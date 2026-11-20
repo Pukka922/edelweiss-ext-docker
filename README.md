@@ -17,6 +17,9 @@ daemon:
   connect containers to networks and disconnect them.
 - **Registries** with or without login, for pulls; the connection can be tested.
 
+The lists are sorted by name; those of containers, images, volumes and networks can be searched and show 25 entries per
+page.
+
 Container names start with a letter or digit and have at least two characters (Docker's rule).
 
 Editing a container changes its name, restart policy and memory and CPU limits directly; removing a limit and every

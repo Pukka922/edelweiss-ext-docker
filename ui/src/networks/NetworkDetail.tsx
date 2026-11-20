@@ -15,6 +15,7 @@ import { Input, Select } from "../components/Field";
 import { Field } from "../components/FormDialog";
 import { IconButton } from "../components/IconButton";
 import { errorField, errorText } from "../errors";
+import { compareNames } from "../listing";
 import { onDockerChange } from "../live";
 
 export function NetworkDetail(props: { params: Record<string, string> }) {
@@ -43,7 +44,9 @@ export function NetworkDetail(props: { params: Record<string, string> }) {
   const connectable = () => {
     if (containers.error) return [];
     const attached = new Set((loaded()?.attached ?? []).map((a) => a.id));
-    return (containers() ?? []).filter((c) => !attached.has(c.id));
+    return (containers() ?? [])
+      .filter((c) => !attached.has(c.id))
+      .sort((a, b) => compareNames(a.name, b.name));
   };
   const selected = () => connectable().find((c) => c.id === chosen());
   // a container that is no longer offered (removed, or connected meanwhile) must not stay chosen: Connect would do nothing
@@ -165,7 +168,11 @@ export function NetworkDetail(props: { params: Record<string, string> }) {
                     </tr>
                   </thead>
                   <tbody>
-                    <For each={n().attached}>
+                    <For
+                      each={n()
+                        .attached.slice()
+                        .sort((a, b) => compareNames(a.name, b.name))}
+                    >
                       {(a) => (
                         <tr>
                           <td>

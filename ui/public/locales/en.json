@@ -45,6 +45,7 @@
   "containers": {
     "create": "Create container",
     "empty": "There are no containers yet.",
+    "search": "Search containers …",
     "name": "Name",
     "image": "Image",
     "state": "State",
@@ -214,6 +215,7 @@
     "prune": "Remove unused",
     "unusedOnly": "Unused only",
     "empty": "There are no images.",
+    "search": "Search images …",
     "tags": "Tags",
     "id": "ID",
     "size": "Size",
@@ -232,6 +234,7 @@
   "volumes": {
     "create": "Create volume",
     "empty": "There are no volumes.",
+    "search": "Search volumes …",
     "name": "Name",
     "nameHint": "empty: Docker picks a name",
     "driver": "Driver",
@@ -250,6 +253,7 @@
   "networks": {
     "create": "Create network",
     "empty": "There are no networks.",
+    "search": "Search networks …",
     "name": "Name",
     "driver": "Driver",
     "scope": "Scope",
@@ -300,6 +304,14 @@
     "editTitle": "Edit registry",
     "addTitle": "Add registry",
     "httpHint": "A registry without TLS (http://) also needs insecure-registries in /etc/docker/daemon.json."
+  },
+  "list": {
+    "noMatch": "No matches for “{{ query }}”",
+    "page": "Page {{ page }} of {{ pages }}",
+    "first": "First page",
+    "prev": "Previous page",
+    "next": "Next page",
+    "last": "Last page"
   },
   "kv": { "key": "Key", "value": "Value", "add": "Add option" },
   "errors": {

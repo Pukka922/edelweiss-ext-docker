@@ -238,3 +238,129 @@ describe("ContainerList", () => {
     expect(await view.findByText("Docker is not running: gone")).toBeTruthy();
   });
 });
+
+/** The names of the rows of the table, in order. */
+const names = (view: ReturnType<typeof mount>) =>
+  view
+    .getAllByRole("row")
+    .slice(1)
+    .map((r) => r.querySelector("td")?.textContent?.trim());
+
+/** n containers c01, c02 …, in the order Docker could answer with: reversed. */
+const many = (n: number): ContainerSummary[] =>
+  Array.from({ length: n }, (_, i) => ({
+    ...web,
+    id: `id${String(i + 1).padStart(2, "0")}`,
+    name: `c${String(i + 1).padStart(2, "0")}`,
+    ports: [],
+  })).reverse();
+
+describe("ContainerList sorting, search and paging", () => {
+  it("shows the containers sorted by name", async () => {
+    stubEventSource();
+    const b = { ...web, id: "b", name: "Beta10" };
+    const c = { ...web, id: "c", name: "beta2" };
+    const a = { ...web, id: "a", name: "alpha" };
+    stubFetch({ "GET /containers": () => json(200, [b, c, a]) });
+    const view = mount(ContainerList);
+    await view.findByText("alpha");
+    expect(names(view)).toEqual(["alpha", "beta2", "Beta10"]);
+  });
+
+  it("searches name, image, state and published host port", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, [db, web]) });
+    const view = mount(ContainerList);
+    await view.findByText("web");
+    const search = view.getByRole("searchbox", { name: "Search containers …" }) as HTMLInputElement;
+    expect(search.placeholder).toBe("Search containers …");
+    fireEvent.input(search, { target: { value: "POSTGRES" } });
+    expect(names(view)).toEqual(["db"]);
+    fireEvent.input(search, { target: { value: "nginx" } });
+    expect(names(view)).toEqual(["web"]);
+    fireEvent.input(search, { target: { value: "stopped" } });
+    expect(names(view)).toEqual(["db"]);
+    fireEvent.input(search, { target: { value: "8080" } });
+    expect(names(view)).toEqual(["web"]);
+    fireEvent.input(search, { target: { value: "443" } }); // not published: no host port
+    expect(view.queryByRole("table")).toBeNull();
+  });
+
+  it("says so when nothing matches, and hides the table and the pager", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, many(30)) });
+    const view = mount(ContainerList);
+    await view.findByText("c01");
+    fireEvent.input(view.getByRole("searchbox"), { target: { value: "zzz" } });
+    expect(view.getByText("No matches for “zzz”")).toBeTruthy();
+    expect(view.queryByRole("table")).toBeNull();
+    expect(view.queryByText(/Page \d of/)).toBeNull();
+    expect(view.queryByText("There are no containers yet.")).toBeNull();
+  });
+
+  it("pages 30 containers into two pages of 25 and 5", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, many(30)) });
+    const view = mount(ContainerList);
+    await view.findByText("c01");
+    expect(names(view)).toHaveLength(25);
+    expect(names(view)[0]).toBe("c01");
+    expect(view.getByText("Page 1 of 2")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Next page" }));
+    expect(view.getByText("Page 2 of 2")).toBeTruthy();
+    expect(names(view)).toEqual(["c26", "c27", "c28", "c29", "c30"]);
+    fireEvent.click(view.getByRole("button", { name: "First page" }));
+    expect(names(view)[0]).toBe("c01");
+  });
+
+  it("shows no pager for a single page", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, many(25)) });
+    const view = mount(ContainerList);
+    await view.findByText("c01");
+    expect(view.queryByRole("button", { name: "Next page" })).toBeNull();
+  });
+
+  it("goes back to page 1 when the search changes", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, many(60)) });
+    const view = mount(ContainerList);
+    await view.findByText("c01");
+    fireEvent.click(view.getByRole("button", { name: "Last page" }));
+    expect(view.getByText("Page 3 of 3")).toBeTruthy();
+    fireEvent.input(view.getByRole("searchbox"), { target: { value: "c" } });
+    expect(view.getByText("Page 1 of 3")).toBeTruthy();
+    expect(names(view)[0]).toBe("c01");
+  });
+
+  it("clamps the page when a reload leaves fewer containers", async () => {
+    const sources = stubEventSource();
+    let list = many(30);
+    stubFetch({ "GET /containers": () => json(200, list) });
+    const view = mount(ContainerList);
+    await view.findByText("c01");
+    fireEvent.click(view.getByRole("button", { name: "Next page" }));
+    expect(view.getByText("Page 2 of 2")).toBeTruthy();
+    list = many(10);
+    sources.instances
+      .find((s) => s.url === "/ext/docker/api/events")
+      ?.emit("docker", JSON.stringify({ type: "container", action: "destroy", id: "x" }));
+    await waitFor(() => expect(names(view)).toHaveLength(10));
+    expect(view.queryByText(/Page \d of/)).toBeNull();
+    expect(names(view)[0]).toBe("c01");
+  });
+
+  it("keeps search and page across an unmount and a new mount", async () => {
+    stubEventSource();
+    stubFetch({ "GET /containers": () => json(200, many(60)) });
+    const first = mount(ContainerList);
+    await first.findByText("c01");
+    fireEvent.input(first.getByRole("searchbox"), { target: { value: "c" } });
+    fireEvent.click(first.getByRole("button", { name: "Next page" }));
+    cleanup();
+    const view = mount(ContainerList);
+    await view.findByText("c26");
+    expect((view.getByRole("searchbox") as HTMLInputElement).value).toBe("c");
+    expect(view.getByText("Page 2 of 3")).toBeTruthy();
+  });
+});

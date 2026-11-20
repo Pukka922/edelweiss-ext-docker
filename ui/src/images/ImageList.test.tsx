@@ -369,3 +369,76 @@ describe("ImageList", () => {
     });
   });
 });
+
+describe("ImageList sorting and search", () => {
+  const rowsOf = (view: ReturnType<typeof mount>) =>
+    view
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.querySelector("td")?.textContent?.trim());
+
+  it("sorts the tags of an image, the images by first tag, the untagged ones last by ID", async () => {
+    stubEventSource();
+    const zed: ImageInfo = {
+      ...busybox,
+      id: `sha256:${"1".repeat(64)}`,
+      tags: ["zed:2", "Alpine:10", "alpine:9"],
+    };
+    const old2: ImageInfo = { ...old, id: `sha256:${"0".repeat(64)}` };
+    stubFetch({ "GET /images": () => json(200, [old, nginx, old2, zed]) });
+    const view = mount(ImageList, { path: "/images" });
+    await view.findByText("nginx:1.29");
+    // alpine:9 comes before Alpine:10 (numbers sort naturally), so that is the first tag of the image
+    expect(rowsOf(view)).toEqual(["alpine:9Alpine:10zed:2", "nginx:1.29nginx:latest", "no tag", "no tag"]);
+    const ids = view
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.querySelectorAll("td")[1]?.textContent);
+    expect(ids.slice(2)).toEqual(["000000000000", "bbbbbbbbbbbb"]);
+  });
+
+  it("sorts the names in Used by", async () => {
+    stubEventSource();
+    const shared: ImageInfo = {
+      ...busybox,
+      usedBy: [
+        { id: "c3", name: "web10" },
+        { id: "c1", name: "web2" },
+      ],
+    };
+    stubFetch({ "GET /images": () => json(200, [shared]) });
+    const view = mount(ImageList, { path: "/images" });
+    await view.findByText("busybox:1.37");
+    const users = view.getAllByRole("button", { name: /^web/ }).map((b) => b.textContent);
+    expect(users).toEqual(["web2", "web10"]);
+  });
+
+  it("searches tags, the shown ID and the users", async () => {
+    stubEventSource();
+    stubFetch({ "GET /images": () => json(200, [nginx, old, busybox]) });
+    const view = mount(ImageList, { path: "/images" });
+    await view.findByText("nginx:1.29");
+    const search = view.getByRole("searchbox", { name: "Search images …" });
+    fireEvent.input(search, { target: { value: "BUSY" } });
+    expect(rowsOf(view)).toEqual(["busybox:1.37"]);
+    fireEvent.input(search, { target: { value: "bbbbbb" } });
+    expect(rowsOf(view)).toEqual(["no tag"]);
+    fireEvent.input(search, { target: { value: "web" } });
+    expect(rowsOf(view)).toEqual(["nginx:1.29nginx:latest"]);
+    fireEvent.input(search, { target: { value: "nope" } });
+    expect(view.getByText("No matches for “nope”")).toBeTruthy();
+    expect(view.queryByRole("table")).toBeNull();
+  });
+
+  it("combines the search with Unused only", async () => {
+    stubEventSource();
+    stubFetch({ "GET /images": () => json(200, [nginx, old, busybox]) });
+    const view = mount(ImageList, { path: "/images" });
+    await view.findByText("nginx:1.29");
+    fireEvent.click(view.getByLabelText("Unused only"));
+    fireEvent.input(view.getByRole("searchbox"), { target: { value: "nginx" } });
+    expect(view.getByText("No matches for “nginx”")).toBeTruthy();
+    fireEvent.input(view.getByRole("searchbox"), { target: { value: "1." } });
+    expect(rowsOf(view)).toEqual(["busybox:1.37"]);
+  });
+});

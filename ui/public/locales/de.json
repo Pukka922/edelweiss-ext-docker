@@ -45,6 +45,7 @@
   "containers": {
     "create": "Container anlegen",
     "empty": "Es gibt noch keine Container.",
+    "search": "Container suchen …",
     "name": "Name",
     "image": "Image",
     "state": "Zustand",
@@ -214,6 +215,7 @@
     "prune": "Ungenutzte entfernen",
     "unusedOnly": "Nur ungenutzte",
     "empty": "Es gibt keine Images.",
+    "search": "Images suchen …",
     "tags": "Tags",
     "id": "ID",
     "size": "Größe",
@@ -232,6 +234,7 @@
   "volumes": {
     "create": "Volume anlegen",
     "empty": "Es gibt keine Volumes.",
+    "search": "Volumes suchen …",
     "name": "Name",
     "nameHint": "leer: Docker wählt einen Namen",
     "driver": "Treiber",
@@ -250,6 +253,7 @@
   "networks": {
     "create": "Netzwerk anlegen",
     "empty": "Es gibt keine Netzwerke.",
+    "search": "Netzwerke suchen …",
     "name": "Name",
     "driver": "Treiber",
     "scope": "Scope",
@@ -300,6 +304,14 @@
     "editTitle": "Registry bearbeiten",
     "addTitle": "Registry hinzufügen",
     "httpHint": "Eine Registry ohne TLS (http://) braucht zusätzlich insecure-registries in /etc/docker/daemon.json."
+  },
+  "list": {
+    "noMatch": "Keine Treffer für „{{ query }}“",
+    "page": "Seite {{ page }} von {{ pages }}",
+    "first": "Erste Seite",
+    "prev": "Vorherige Seite",
+    "next": "Nächste Seite",
+    "last": "Letzte Seite"
   },
   "kv": { "key": "Schlüssel", "value": "Wert", "add": "Option hinzufügen" },
   "errors": {
